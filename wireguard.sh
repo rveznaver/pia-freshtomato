@@ -31,10 +31,10 @@ wg_ip=$(echo $pia_auth | php-cli -R 'echo json_decode($argn)->peer_ip;')
 # init interface
 modprobe wireguard
 ip link add wg0 type wireguard
-ip link set wg0 up
 
 # configure interface
 wg set wg0 fwmark 51820 private-key <(echo "$wg_genkey") peer "$pia_pubkey" endpoint "$pia_ip:$pia_port" persistent-keepalive 25 allowed-ips '0.0.0.0/0,::/0'
+ip link set wg0 up
 ip addr flush dev wg0
 ip addr add "$wg_ip" dev wg0
 

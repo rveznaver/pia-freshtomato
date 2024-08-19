@@ -98,7 +98,7 @@ pia_port=$(cat pia_paysig | php -R 'echo json_decode(base64_decode(json_decode($
 
 # scheduler config: every 15 mins
 # cd /tmp/home/root && ./pia_refresh
-logger "refresh PIA forward $pia_vpn_wg_ip:$pia_port - $(/usr/sbin/curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "payload=${pia_payload}" --data-urlencode "signature=${pia_signature}" "https://${pia_vpn_wg_cn}:19999/bindPort" --interface wg0)"
+logger "refresh PIA forward $pia_vpn_wg_ip:$pia_port - $(curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "payload=${pia_payload}" --data-urlencode "signature=${pia_signature}" "https://${pia_vpn_wg_cn}:19999/bindPort" --interface wg0)"
 EOF
 chmod +x pia_refresh
 

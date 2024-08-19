@@ -4,11 +4,11 @@
 # - FreshTomato >= 2024.3
 # - wg kernel module for WireGuard
 # - curl and wget for API requests
-# - php-cli for JSON parsing
+# - php for JSON parsing
 # - tr for removing newlines in API responses
 
-# set PATH in case we run inside a cron
-export PATH='/bin:/usr/bin:/sbin:/usr/sbin'
+export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
+if ! type "php" &> /dev/null; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
 echo 'Setting up WireGuard kernel module...'
 modprobe wireguard # init interface
@@ -23,15 +23,15 @@ echo 'Downloading PIA certificate...'
 curl --retry 10 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt' -o pia_cert
 
 echo 'Setting up PIA region...'
-curl --retry 10 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v6' | head -1 | php-cli -R 'echo json_encode(array_values(array_filter(json_decode($argn)->regions, fn($r) => $r->id == "'"$pia_vpn"'"))[0]);' > pia_region
-pia_vpn_meta_cn=$(cat pia_region | php-cli -R 'echo json_decode($argn)->servers->meta[0]->cn;')
-pia_vpn_meta_ip=$(cat pia_region | php-cli -R 'echo json_decode($argn)->servers->meta[0]->ip;')
-pia_vpn_wg_cn=$(cat pia_region | php-cli -R 'echo json_decode($argn)->servers->wg[0]->cn;')
-pia_vpn_wg_ip=$(cat pia_region | php-cli -R 'echo json_decode($argn)->servers->wg[0]->ip;')
+curl --retry 10 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v6' | head -1 | php -R 'echo json_encode(array_values(array_filter(json_decode($argn)->regions, fn($r) => $r->id == "'"$pia_vpn"'"))[0]);' > pia_region
+pia_vpn_meta_cn=$(cat pia_region | php -R 'echo json_decode($argn)->servers->meta[0]->cn;')
+pia_vpn_meta_ip=$(cat pia_region | php -R 'echo json_decode($argn)->servers->meta[0]->ip;')
+pia_vpn_wg_cn=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->cn;')
+pia_vpn_wg_ip=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->ip;')
 pia_vpn_wg_port='1337'
 
 echo 'Generating PIA token...'
-curl --retry 10 --retry-all-errors -SGs -u "$pia_user:$pia_pass" --connect-to "$pia_vpn_meta_cn::$pia_vpn_meta_ip:" --cacert pia_cert https://$pia_vpn_meta_cn/authv3/generateToken | tr -d '\n' | php-cli -R 'echo json_decode($argn)->token;' > pia_token
+curl --retry 10 --retry-all-errors -SGs -u "$pia_user:$pia_pass" --connect-to "$pia_vpn_meta_cn::$pia_vpn_meta_ip:" --cacert pia_cert https://$pia_vpn_meta_cn/authv3/generateToken | tr -d '\n' | php -R 'echo json_decode($argn)->token;' > pia_token
 
 echo 'Generating WireGuard keys...'
 wg genkey > peer_prvkey
@@ -39,12 +39,13 @@ peer_pubkey=$(cat peer_prvkey | wg pubkey)
 
 echo 'Authenticating to PIA...'
 curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$pia_vpn_wg_ip:" --cacert pia_cert --data-urlencode "pt=$(cat pia_token)" --data-urlencode "pubkey=$peer_pubkey" "https://$pia_vpn_wg_cn:$pia_vpn_wg_port/addKey" | tr -d '\n' > pia_auth
-peer_ip=$(cat pia_auth | php-cli -R 'echo json_decode($argn)->peer_ip;')
-server_key=$(cat pia_auth | php-cli -R 'echo json_decode($argn)->server_key;')
-server_vip=$(cat pia_auth | php-cli -R 'echo json_decode($argn)->server_vip;')
+peer_ip=$(cat pia_auth | php -R 'echo json_decode($argn)->peer_ip;')
+server_key=$(cat pia_auth | php -R 'echo json_decode($argn)->server_key;')
+server_vip=$(cat pia_auth | php -R 'echo json_decode($argn)->server_vip;')
 
 ### OPTIONAL ###
 ### Force wireguard traffic over specific interface
+# ip route list metric 50 | while read r; do ip route del $r; done
 # ip route add $pia_vpn_wg_ip/32 via 10.71.0.1 dev wlp2s0 metric 50
 ### Disable IPv6 with sysctl as PIA does not yet support it
 # sysctl net.ipv6.conf.wg0.disable_ipv6=1
@@ -73,9 +74,9 @@ iptables -t nat -I POSTROUTING -o wg0 -j MASQUERADE
 
 echo 'Requesting port forward...'
 curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "token=$(cat pia_token)" "https://$pia_vpn_wg_cn:19999/getSignature" --interface wg0 | tr -d '\n' > pia_paysig
-pia_signature=$(cat pia_paysig | php-cli -R 'echo json_decode($argn)->signature;')
-pia_payload=$(cat pia_paysig | php-cli -R 'echo json_decode($argn)->payload;')
-pia_port=$(cat pia_paysig | php-cli -R 'echo json_decode(base64_decode(json_decode($argn)->payload))->port;')
+pia_signature=$(cat pia_paysig | php -R 'echo json_decode($argn)->signature;')
+pia_payload=$(cat pia_paysig | php -R 'echo json_decode($argn)->payload;')
+pia_port=$(cat pia_paysig | php -R 'echo json_decode(base64_decode(json_decode($argn)->payload))->port;')
 
 echo 'Setting up port with NAT...'
 curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "payload=$pia_payload" --data-urlencode "signature=$pia_signature" "https://$pia_vpn_wg_cn:19999/bindPort" --interface wg0
@@ -84,13 +85,16 @@ iptables -I FORWARD -i wg0 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT -d
 
 echo 'Writing out pia_refresh script for port rebinding...'
 cat <<'EOF' > pia_refresh
+export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
+if ! type "php" &> /dev/null; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
+
 # vars for port forwarding API refresh
-pia_vpn_wg_ip=$(cat pia_region | php-cli -R 'echo json_decode($argn)->servers->wg[0]->ip;')
-pia_vpn_wg_cn=$(cat pia_region | php-cli -R 'echo json_decode($argn)->servers->wg[0]->cn;')
-server_vip=$(cat pia_auth | php-cli -R 'echo json_decode($argn)->server_vip;')
-pia_signature=$(cat pia_paysig | php-cli -R 'echo json_decode($argn)->signature;')
-pia_payload=$(cat pia_paysig | php-cli -R 'echo json_decode($argn)->payload;')
-pia_port=$(cat pia_paysig | php-cli -R 'echo json_decode(base64_decode(json_decode($argn)->payload))->port;')
+pia_vpn_wg_ip=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->ip;')
+pia_vpn_wg_cn=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->cn;')
+server_vip=$(cat pia_auth | php -R 'echo json_decode($argn)->server_vip;')
+pia_signature=$(cat pia_paysig | php -R 'echo json_decode($argn)->signature;')
+pia_payload=$(cat pia_paysig | php -R 'echo json_decode($argn)->payload;')
+pia_port=$(cat pia_paysig | php -R 'echo json_decode(base64_decode(json_decode($argn)->payload))->port;')
 
 # scheduler config: every 15 mins
 # cd /tmp/home/root && ./pia_refresh

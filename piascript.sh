@@ -14,15 +14,15 @@ export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a c
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
 retry() {
-  local attempt=1 backoff=1
-  while [ $attempt -le 5 ]; do
-    if [ $attempt -gt 1 ]; then
-      echo "  Retry $attempt/5 (backoff: ${backoff}s)..."
-      sleep "$backoff"
-      backoff=$((backoff * 2))
+  local var_attempt=1 var_backoff=1
+  while [ $var_attempt -le 5 ]; do
+    if [ $var_attempt -gt 1 ]; then
+      echo "  Retry $var_attempt/5 (backoff: ${var_backoff}s)..."
+      sleep "$var_backoff"
+      var_backoff=$((var_backoff * 2))
     fi
     "$@" && return 0
-    attempt=$((attempt + 1))
+    var_attempt=$((var_attempt + 1))
   done
   echo "ERROR: Failed after 5 attempts: $*"
   exit 1
@@ -46,14 +46,14 @@ init_script() {
   fi
   
   # Save credentials to config (preserve other variables)
-  local init_vars
-  init_vars=$(cat <<EOF
+  local vars_init
+  vars_init=$(cat <<EOF
 pia_user="$pia_user"
 pia_pass="$pia_pass"
 pia_vpn="$pia_vpn"
 EOF
 )
-  printf "%s\n%s\n" "$(grep -v '^pia_user=\|^pia_pass=\|^pia_vpn=' pia_config 2>/dev/null || true)" "$init_vars" > pia_config
+  printf "%s\n%s\n" "$(grep -v '^pia_user=\|^pia_pass=\|^pia_vpn=' pia_config 2>/dev/null || true)" "$vars_init" > pia_config
   
   echo 'Script initialized'
 }
@@ -67,21 +67,48 @@ init_module() {
 
 get_cert() {
   echo 'Downloading PIA certificate...'
+  # Load config to check if cert exists
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+  
+  # Skip if certificate already exists (idempotent)
+  if [ -n "${certificate:-}" ] && [ -f pia_cert ]; then
+    echo 'Certificate already exists'
+    echo 'Certificate ready'
+    return 0
+  fi
+  
   # Download certificate
-  local cert
-  cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
-  [ -n "$cert" ] || { echo "ERROR: Certificate download failed"; exit 1; }
+  local var_cert
+  var_cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
+  [ -n "$var_cert" ] || { echo "ERROR: Certificate download failed"; exit 1; }
+  
   # Save to config (base64 encoded using PHP)
-  printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"$(echo "$cert" | php -r 'echo base64_encode(file_get_contents("php://stdin"));')\"" > pia_config
+  printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"$(echo "$var_cert" | php -r 'echo base64_encode(file_get_contents("php://stdin"));')\"" > pia_config
+  
+  # Write certificate file
+  echo "$var_cert" > pia_cert
+  
   echo 'Certificate ready'
 }
 
 get_region() {
   echo 'Fetching PIA region info...'
-  local php_code region_vars
+  # Load config to check if region info exists
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+  
+  # Skip if region info already exists (idempotent)
+  if [ -n "${region_meta_cn:-}" ] && [ -n "${region_wg_cn:-}" ]; then
+    echo 'Region info already exists'
+    echo 'Region info ready'
+    return 0
+  fi
+  
+  local var_php vars_region
 
   # PHP code to extract region info
-  php_code=$(cat <<'EOF'
+  var_php=$(cat <<'EOF'
     $r = current(array_filter(json_decode($argn)->regions, fn($x) => $x->id == "REGION_ID"));
     if (!$r) die("ERROR: Region 'REGION_ID' not found\n");
     $mt = $r->servers->meta[0];
@@ -93,11 +120,11 @@ get_region() {
     echo "region_wg_port=\"1337\"\n";
 EOF
 )
-  php_code=$(echo "$php_code" | sed "s/REGION_ID/$pia_vpn/g")
+  var_php=$(echo "$var_php" | sed "s/REGION_ID/$pia_vpn/g")
     
-  region_vars=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -R "$php_code")
-  [ -n "$region_vars" ] || { echo "ERROR: Failed to fetch region info"; exit 1; }
-  printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "$region_vars" > pia_config
+  vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -R "$var_php")
+  [ -n "$vars_region" ] || { echo "ERROR: Failed to fetch region info"; exit 1; }
+  printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "$vars_region" > pia_config
   echo 'Region info ready'
 }
 
@@ -106,13 +133,49 @@ get_token() {
   # Load region info from config
   # shellcheck disable=SC1091
   . ./pia_config
+  
+  # Skip if token already exists (idempotent)
+  if [ -n "${token:-}" ]; then
+    echo 'Token already exists'
+    echo 'Token ready'
+    return 0
+  fi
+  
   # Validate required variables are loaded
   [ -z "${region_meta_cn:-}" ] || [ -z "${region_meta_ip:-}" ] && { echo "ERROR: Region info not available"; exit 1; }
-  local token
-  token=$(curl --retry 5 --retry-all-errors -Ss -u "$pia_user:$pia_pass" --connect-to "$region_meta_cn::$region_meta_ip:" --cacert pia_cert "https://$region_meta_cn/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
-  [ -n "$token" ] || { echo "ERROR: Failed to generate token"; exit 1; }
-  printf "%s\n%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" "token=\"$token\"" > pia_config
+  local var_token
+  var_token=$(curl --retry 5 --retry-all-errors -Ss -u "$pia_user:$pia_pass" --connect-to "$region_meta_cn::$region_meta_ip:" --cacert pia_cert "https://$region_meta_cn/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
+  [ -n "$var_token" ] || { echo "ERROR: Failed to generate token"; exit 1; }
+  printf "%s\n%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" "token=\"$var_token\"" > pia_config
   echo 'Token ready'
+}
+
+gen_keys() {
+  echo 'Generating WireGuard keys...'
+  # Load config to check if keys exist
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+  
+  # Skip if keys already exist (idempotent)
+  if [ -n "${peer_prvkey:-}" ] && [ -n "${peer_pubkey:-}" ]; then
+    echo 'Keys already exist'
+    echo "$peer_prvkey" > peer_prvkey
+    echo 'Keys ready'
+    return 0
+  fi
+  
+  # Generate new keys
+  local var_prvkey var_pubkey
+  var_prvkey=$(wg genkey)
+  var_pubkey=$(echo "$var_prvkey" | wg pubkey)
+  
+  # Save to config
+  printf "%s\n%s\n%s\n" "$(grep -v '^peer_prvkey=\|^peer_pubkey=' pia_config 2>/dev/null || true)" "peer_prvkey=\"$var_prvkey\"" "peer_pubkey=\"$var_pubkey\"" > pia_config
+  
+  # Write private key file (needed by wg command)
+  echo "$var_prvkey" > peer_prvkey
+  
+  echo 'Keys ready'
 }
 
 init_script
@@ -120,10 +183,7 @@ init_module
 get_cert
 get_region
 get_token
-
-echo 'Generating WireGuard keys...'
-wg genkey > peer_prvkey
-peer_pubkey=$(cat peer_prvkey | wg pubkey)
+gen_keys
 
 echo 'Authenticating to PIA...'
 curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$pia_vpn_wg_ip:" --cacert pia_cert --data-urlencode "pt=$(cat pia_token)" --data-urlencode "pubkey=$peer_pubkey" "https://$pia_vpn_wg_cn:$pia_vpn_wg_port/addKey" | tr -d '\n' > pia_auth

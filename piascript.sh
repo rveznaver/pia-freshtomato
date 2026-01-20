@@ -1,37 +1,125 @@
 #!/usr/bin/env ash
+# shellcheck shell=dash
+
+set -eu  # Exit on error or undefined variable
 
 # requirements:
-# - FreshTomato >= 2024.3
+# - FreshTomato >= 2024.3 or some Linux distro
 # - wg kernel module for WireGuard
-# - curl and wget for API requests
-# - php for JSON parsing
-# - tr for removing newlines in API responses
+# - curl for API requests
+# - php for JSON parsing and base64 encoding
+# - Standard POSIX tools: sed, grep
 
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
-if ! type "php" &> /dev/null; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
+if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
-echo 'Setting up WireGuard kernel module...'
-modprobe wireguard # init interface
-ip link add wg0 type wireguard # disregard RNETLINK File exists error
+retry() {
+  local attempt=1 backoff=1
+  while [ $attempt -le 5 ]; do
+    if [ $attempt -gt 1 ]; then
+      echo "  Retry $attempt/5 (backoff: ${backoff}s)..."
+      sleep "$backoff"
+      backoff=$((backoff * 2))
+    fi
+    "$@" && return 0
+    attempt=$((attempt + 1))
+  done
+  echo "ERROR: Failed after 5 attempts: $*"
+  exit 1
+}
 
-# PIA info
-[ -z "$pia_user" ] && { echo 'pia_user not set'; exit 1; }
-[ -z "$pia_pass" ] && { echo 'pia_pass not set'; exit 1; }
-[ -z "$pia_vpn" ]  && { echo 'pia_vpn not set, defaulting to ca (Montreal, Canada)'; pia_vpn='ca'; }
+init_script() {
+  echo 'Initializing script...'
+  
+  # Load existing config if available
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+  
+  # Validate required variables
+  [ -z "${pia_user:-}" ] && { echo 'ERROR: pia_user not set'; exit 1; }
+  [ -z "${pia_pass:-}" ] && { echo 'ERROR: pia_pass not set'; exit 1; }
+  
+  # Set default region if not set
+  if [ -z "${pia_vpn:-}" ]; then
+    echo 'pia_vpn not set, defaulting to ca (Montreal, Canada)'
+    pia_vpn='ca'
+  fi
+  
+  # Save credentials to config (preserve other variables)
+  local init_vars
+  init_vars=$(cat <<EOF
+pia_user="$pia_user"
+pia_pass="$pia_pass"
+pia_vpn="$pia_vpn"
+EOF
+)
+  printf "%s\n%s\n" "$(grep -v '^pia_user=\|^pia_pass=\|^pia_vpn=' pia_config 2>/dev/null || true)" "$init_vars" > pia_config
+  
+  echo 'Script initialized'
+}
 
-echo 'Downloading PIA certificate...'
-curl --retry 10 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt' -o pia_cert
+init_module() {
+  echo 'Initializing WireGuard...'
+  modprobe wireguard || { echo "ERROR: Cannot load wireguard module"; exit 1; }
+  ip link show wg0 >/dev/null 2>&1 || ip link add wg0 type wireguard || { echo "ERROR: Cannot create wg0 interface"; exit 1; }
+  echo 'WireGuard ready'
+}
 
-echo 'Setting up PIA region...'
-curl --retry 10 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v6' | head -1 | php -R 'echo json_encode(array_values(array_filter(json_decode($argn)->regions, fn($r) => $r->id == "'"$pia_vpn"'"))[0]);' > pia_region
-pia_vpn_meta_cn=$(cat pia_region | php -R 'echo json_decode($argn)->servers->meta[0]->cn;')
-pia_vpn_meta_ip=$(cat pia_region | php -R 'echo json_decode($argn)->servers->meta[0]->ip;')
-pia_vpn_wg_cn=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->cn;')
-pia_vpn_wg_ip=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->ip;')
-pia_vpn_wg_port='1337'
+get_cert() {
+  echo 'Downloading PIA certificate...'
+  # Download certificate
+  local cert
+  cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
+  [ -n "$cert" ] || { echo "ERROR: Certificate download failed"; exit 1; }
+  # Save to config (base64 encoded using PHP)
+  printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"$(echo "$cert" | php -r 'echo base64_encode(file_get_contents("php://stdin"));')\"" > pia_config
+  echo 'Certificate ready'
+}
 
-echo 'Generating PIA token...'
-curl --retry 10 --retry-all-errors -SGs -u "$pia_user:$pia_pass" --connect-to "$pia_vpn_meta_cn::$pia_vpn_meta_ip:" --cacert pia_cert https://$pia_vpn_meta_cn/authv3/generateToken | tr -d '\n' | php -R 'echo json_decode($argn)->token;' > pia_token
+get_region() {
+  echo 'Fetching PIA region info...'
+  local php_code region_vars
+
+  # PHP code to extract region info
+  php_code=$(cat <<'EOF'
+    $r = current(array_filter(json_decode($argn)->regions, fn($x) => $x->id == "REGION_ID"));
+    if (!$r) die("ERROR: Region 'REGION_ID' not found\n");
+    $mt = $r->servers->meta[0];
+    $wg = $r->servers->wg[0];
+    echo "region_meta_cn=\"$mt->cn\"\n";
+    echo "region_meta_ip=\"$mt->ip\"\n";
+    echo "region_wg_cn=\"$wg->cn\"\n";
+    echo "region_wg_ip=\"$wg->ip\"\n";
+    echo "region_wg_port=\"1337\"\n";
+EOF
+)
+  php_code=$(echo "$php_code" | sed "s/REGION_ID/$pia_vpn/g")
+    
+  region_vars=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -R "$php_code")
+  [ -n "$region_vars" ] || { echo "ERROR: Failed to fetch region info"; exit 1; }
+  printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "$region_vars" > pia_config
+  echo 'Region info ready'
+}
+
+get_token() {
+  echo 'Generating PIA token...'
+  # Load region info from config
+  # shellcheck disable=SC1091
+  . ./pia_config
+  # Validate required variables are loaded
+  [ -z "${region_meta_cn:-}" ] || [ -z "${region_meta_ip:-}" ] && { echo "ERROR: Region info not available"; exit 1; }
+  local token
+  token=$(curl --retry 5 --retry-all-errors -Ss -u "$pia_user:$pia_pass" --connect-to "$region_meta_cn::$region_meta_ip:" --cacert pia_cert "https://$region_meta_cn/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
+  [ -n "$token" ] || { echo "ERROR: Failed to generate token"; exit 1; }
+  printf "%s\n%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" "token=\"$token\"" > pia_config
+  echo 'Token ready'
+}
+
+init_script
+init_module
+get_cert
+get_region
+get_token
 
 echo 'Generating WireGuard keys...'
 wg genkey > peer_prvkey
@@ -86,7 +174,7 @@ iptables -I FORWARD -i wg0 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT -d
 echo 'Writing out pia_refresh script for port rebinding...'
 cat <<'EOF' > pia_refresh
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
-if ! type "php" &> /dev/null; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
+if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
 # vars for port forwarding API refresh
 pia_vpn_wg_ip=$(cat pia_region | php -R 'echo json_decode($argn)->servers->wg[0]->ip;')

@@ -342,7 +342,7 @@ set_bypass() {
     fi
   done
   
-  if [ ${var_existing} -eq ${var_total} ] && [ ${var_total} -gt 0 ]; then
+  if [ "${var_existing}" -eq "${var_total}" ] && [ "${var_total}" -gt 0 ]; then
     echo '[=] VPN bypass already configured'
     return 0
   fi

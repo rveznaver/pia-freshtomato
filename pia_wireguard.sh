@@ -306,9 +306,9 @@ set_firewall() {
   # Remove all existing wg0 rules (clean slate)
   echo '[-] Removing existing wg0 firewall rules'
   for var_table in '' 'nat'; do
-    iptables-save ${var_table:+-t "${var_table}"} | awk '/wg0/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
+    iptables-save ${var_table:+-t ${var_table}} | awk '/wg0/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
       # shellcheck disable=SC2086
-      iptables ${var_table:+-t "${var_table}"} ${var_rule} 2>/dev/null || true
+      iptables ${var_table:+-t ${var_table}} ${var_rule} 2>/dev/null || true
     done
   done
   # Block NEW incoming connections from VPN
@@ -471,22 +471,17 @@ set_duckdns() {
   [ -z "${portforward_port:-}" ] && { echo "[!] ERROR: portforward_port not set (port forwarding must be enabled)"; exit 1; }
   [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
  
-  echo "[*] VPN IP: ${region_wg_ip}"
- 
   # Update DuckDNS A record (IP address)
   local var_response_ip
   var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}")
   [ "${var_response_ip}" = "OK" ] || { echo "[!] ERROR: DuckDNS IP update failed: ${var_response_ip}"; exit 1; }
-  echo "[+] DuckDNS IP updated: ${var_domain}.duckdns.org -> ${region_wg_ip}"
  
   # Update DuckDNS TXT record (port number)
   local var_response_txt
   var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}")
   [ "${var_response_txt}" = "OK" ] || { echo "[!] ERROR: DuckDNS TXT update failed: ${var_response_txt}"; exit 1; }
-  echo "[+] DuckDNS TXT updated: ${var_domain}.duckdns.org TXT -> ${portforward_port}"
  
-  echo "[*] Connect using: ssh \$(dig +short ${var_domain}.duckdns.org) -p \$(dig +short TXT ${var_domain}.duckdns.org | tr -d '\"')"
-  echo '[+] DuckDNS ready'
+  echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"
 }
 
 init_script

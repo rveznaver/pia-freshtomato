@@ -38,7 +38,7 @@ init_script() {
   fi
   # Validate pia_pf format (must be IP:PORT or false)
   if [ "${pia_pf}" != 'false' ]; then
-    echo "${pia_pf}" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5}$' || { echo "[!] ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:22)"; exit 1; }
+    echo "${pia_pf}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}:[0-9]\{1,5\}$' || { echo "[!] ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:22)"; exit 1; }
   fi
   # Set default bypass IPs if not set (Google RCS servers)
   if [ -z "${pia_bypass:-}" ]; then
@@ -48,7 +48,7 @@ init_script() {
   # Validate bypass IPs (prevent injection)
   if [ "${pia_bypass}" != 'false' ]; then
     for ip in ${pia_bypass}; do
-      echo "${ip}" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || { echo "[!] ERROR: Invalid IP in pia_bypass: ${ip}"; exit 1; }
+      echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || { echo "[!] ERROR: Invalid IP in pia_bypass: ${ip}"; exit 1; }
     done
   fi
   # Set default DuckDNS if not set

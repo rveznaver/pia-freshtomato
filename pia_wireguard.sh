@@ -546,4 +546,4 @@ fi
 #   ip route add ${region_wg_ip}/32 via 10.71.0.1 dev wlp2s0 metric 50
 # fi
 
-logger -t pia_wireguard "PIA WireGuard script completed successfully"
+logger -t pia_wireguard "PIA WireGuard script completed"

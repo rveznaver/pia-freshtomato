@@ -80,7 +80,7 @@ EOF
 init_module() {
   echo '[ ] Initializing WireGuard...'
   modprobe wireguard || { echo "[!] ERROR: Failed to load wireguard module"; exit 1; }
-  ip link show wg0 >/dev/null 2>&1 || ip link add wg0 type wireguard || { echo "[!] ERROR: Failed to create wg0 interface"; exit 1; }
+  ip link show | grep -q 'wg0' || ip link add wg0 type wireguard || { echo "[!] ERROR: Failed to create wg0 interface"; exit 1; }
   echo '[+] WireGuard ready'
 }
 
@@ -249,7 +249,7 @@ set_wg() {
   [ -f pia_config ] && . ./pia_config
   # Skip if WireGuard already configured (idempotent)
   # shellcheck disable=SC2312  # Piped commands used for state checks, failures expected
-  if ip link show wg0 2>/dev/null | grep -q 'state UP' && \
+  if ip link show up | grep -q 'wg0' && \
      ip addr show wg0 2>/dev/null | grep -q "${auth_peer_ip:-}" && \
      wg show wg0 peers 2>/dev/null | grep -q "^${auth_server_key:-}$" && \
      [ "$(wg show wg0 peers 2>/dev/null | wc -l)" -eq 1 ]; then

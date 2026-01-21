@@ -36,15 +36,29 @@ init_script() {
     echo '[*] pia_pf (port forwarding) not set, defaulting to false'
     pia_pf='false'
   fi
+  # Validate pia_pf format (must be IP:PORT or false)
+  if [ "${pia_pf}" != 'false' ]; then
+    echo "${pia_pf}" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5}$' || { echo "[!] ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:22)"; exit 1; }
+  fi
   # Set default bypass IPs if not set (Google RCS servers)
   if [ -z "${pia_bypass:-}" ]; then
     echo '[*] pia_bypass (split tunneling by IP) not set, defaulting to Google RCS servers'
     pia_bypass='216.239.36.127 216.239.36.131 216.239.36.132 216.239.36.133 216.239.36.134 216.239.36.135 216.239.36.145'
   fi
+  # Validate bypass IPs (prevent injection)
+  if [ "${pia_bypass}" != 'false' ]; then
+    for ip in ${pia_bypass}; do
+      echo "${ip}" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || { echo "[!] ERROR: Invalid IP in pia_bypass: ${ip}"; exit 1; }
+    done
+  fi
   # Set default DuckDNS if not set
   if [ -z "${pia_duckdns:-}" ]; then
     echo '[*] pia_duckdns (DuckDNS dynamic DNS) not set, defaulting to false'
     pia_duckdns='false'
+  fi
+  # Validate pia_duckdns format (must be DOMAIN:TOKEN or false)
+  if [ "${pia_duckdns}" != 'false' ]; then
+    echo "${pia_duckdns}" | grep -q ':' || { echo "[!] ERROR: pia_duckdns must be in format DOMAIN:TOKEN"; exit 1; }
   fi
   
   # Save credentials to config (preserve other variables)

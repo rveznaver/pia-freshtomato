@@ -14,7 +14,7 @@ export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a c
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
 # Cleanup temporary files on exit
-trap 'rm -f tmp_*' EXIT
+trap 'rm -f pia_tmp_*' EXIT
 
 init_script() {
   echo 'Initializing script...'
@@ -147,12 +147,12 @@ get_token() {
   [ -z "${region_meta_ip:-}" ] && { echo "ERROR: region_meta_ip not set"; exit 1; }
   [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
-  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
+  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  [ -s pia_tmp_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   local var_token
-  var_token=$(curl --retry 5 --retry-all-errors -Ss -u "$pia_user:$pia_pass" --connect-to "$region_meta_cn::$region_meta_ip:" --cacert tmp_pia_cert "https://$region_meta_cn/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
+  var_token=$(curl --retry 5 --retry-all-errors -Ss -u "$pia_user:$pia_pass" --connect-to "$region_meta_cn::$region_meta_ip:" --cacert pia_tmp_cert "https://$region_meta_cn/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
   # Remove certificate file
-  rm -f tmp_pia_cert
+  rm -f pia_tmp_cert
   [ -n "$var_token" ] || { echo "ERROR: Failed to generate token"; exit 1; }
   printf "%s\n%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" "token=\"$var_token\"" > pia_config
   echo 'Token ready'
@@ -200,8 +200,8 @@ get_auth() {
   [ -z "${peer_pubkey:-}" ] && { echo "ERROR: peer_pubkey not set"; exit 1; }
   [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
-  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
+  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  [ -s pia_tmp_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   local var_php vars_auth
   # PHP code to parse auth response
   var_php=$(cat <<'EOF'
@@ -211,9 +211,9 @@ get_auth() {
     echo "auth_server_vip=\"$d->server_vip\"\n";
 EOF
   )
-  vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "$region_wg_cn::$region_wg_ip:" --cacert tmp_pia_cert --data-urlencode "pt=$token" --data-urlencode "pubkey=$peer_pubkey" "https://$region_wg_cn:$region_wg_port/addKey" | php -r "$var_php")
+  vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "$region_wg_cn::$region_wg_ip:" --cacert pia_tmp_cert --data-urlencode "pt=$token" --data-urlencode "pubkey=$peer_pubkey" "https://$region_wg_cn:$region_wg_port/addKey" | php -r "$var_php")
   # Remove certificate file
-  rm -f tmp_pia_cert
+  rm -f pia_tmp_cert
   [ -n "$vars_auth" ] || { echo "ERROR: Failed to authenticate"; exit 1; }
   printf "%s\n%s\n" "$(grep -v '^auth_' pia_config 2>/dev/null || true)" "$vars_auth" > pia_config
   echo 'Auth ready'
@@ -240,13 +240,13 @@ set_wg() {
   [ -z "${region_wg_port:-}" ] && { echo "ERROR: region_wg_port not set"; exit 1; }
   [ -z "${auth_peer_ip:-}" ] && { echo "ERROR: auth_peer_ip not set"; exit 1; }
   # Write private key file (needed by wg command)
-  echo "$peer_prvkey" > tmp_peer_prvkey
+  echo "$peer_prvkey" > pia_tmp_prvkey
   # Remove existing peers
   for p in $(wg show wg0 peers 2>/dev/null); do wg set wg0 peer "$p" remove; done
   # Configure WireGuard
-  wg set wg0 fwmark 0xf0b private-key tmp_peer_prvkey peer "$auth_server_key" endpoint "$region_wg_ip:$region_wg_port" persistent-keepalive 25 allowed-ips '0.0.0.0/0'
+  wg set wg0 fwmark 0xf0b private-key pia_tmp_prvkey peer "$auth_server_key" endpoint "$region_wg_ip:$region_wg_port" persistent-keepalive 25 allowed-ips '0.0.0.0/0'
   # Remove private key file
-  rm -f tmp_peer_prvkey
+  rm -f pia_tmp_prvkey
   ip addr flush dev wg0
   ip addr replace "$auth_peer_ip" dev wg0
   # Bring up interface with retry (often fails first attempt)
@@ -336,8 +336,8 @@ get_portforward() {
   [ -z "${token:-}" ] && { echo "ERROR: token not set"; exit 1; }
   [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
-  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
+  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  [ -s pia_tmp_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   # Request port forward signature
   local var_php vars_portforward
   var_php=$(cat <<'EOF'
@@ -347,9 +347,9 @@ get_portforward() {
     echo "portforward_port=\"" . json_decode(base64_decode($d->payload))->port . "\"\n";
 EOF
   )
-  vars_portforward=$(curl --retry 10 --retry-all-errors -GSs --connect-to "$region_wg_cn::$auth_server_vip:" --cacert tmp_pia_cert --data-urlencode "token=$token" "https://$region_wg_cn:19999/getSignature" --interface wg0 | php -r "$var_php")
+  vars_portforward=$(curl --retry 10 --retry-all-errors -GSs --connect-to "$region_wg_cn::$auth_server_vip:" --cacert pia_tmp_cert --data-urlencode "token=$token" "https://$region_wg_cn:19999/getSignature" --interface wg0 | php -r "$var_php")
   # Remove certificate file
-  rm -f tmp_pia_cert
+  rm -f pia_tmp_cert
   [ -n "$vars_portforward" ] || { echo "ERROR: Failed to get port forward"; exit 1; }
   # Save to config
   printf "%s\n%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" "$vars_portforward" > pia_config
@@ -372,12 +372,12 @@ set_portforward() {
   # Validate pia_pf format (must be IP:PORT)
   echo "$pia_pf" | grep -q '^[0-9.]\+:[0-9]\+$' || { echo "ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
-  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
+  echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  [ -s pia_tmp_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   # Bind port with PIA (always refresh binding)
-  curl -sGm 5 --connect-to "$region_wg_cn::$auth_server_vip:" --cacert tmp_pia_cert --data-urlencode "payload=$portforward_payload" --data-urlencode "signature=$portforward_signature" "https://$region_wg_cn:19999/bindPort" --interface wg0
+  curl -sGm 5 --connect-to "$region_wg_cn::$auth_server_vip:" --cacert pia_tmp_cert --data-urlencode "payload=$portforward_payload" --data-urlencode "signature=$portforward_signature" "https://$region_wg_cn:19999/bindPort" --interface wg0
   # Remove certificate file
-  rm -f tmp_pia_cert
+  rm -f pia_tmp_cert
   # Skip NAT configuration if already set (idempotent)
   if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "$portforward_port" -j DNAT --to-destination "$pia_pf" 2>/dev/null; then
     echo 'Port forward NAT already configured'

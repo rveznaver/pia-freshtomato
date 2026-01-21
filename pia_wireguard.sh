@@ -354,10 +354,11 @@ set_bypass() {
   [ -f pia_config ] && . ./pia_config
   
   # Check if all rules already exist (idempotent)
-  local var_existing=0 var_total=0
+  local var_existing=0 var_total=0 var_rule_list
+  var_rule_list=$(ip rule list)
   for ip in ${pia_bypass}; do
     var_total=$((var_total + 1))
-    if ip rule list | grep -q "to ${ip} lookup main"; then
+    if echo "${var_rule_list}" | grep -q "to ${ip} lookup main"; then
       var_existing=$((var_existing + 1))
     fi
   done

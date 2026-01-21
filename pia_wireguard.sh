@@ -17,6 +17,13 @@ if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomat
 # Cleanup temporary files on exit
 trap 'rm -f pia_tmp_*' EXIT
 
+# Error handler - logs to syslog and exits
+error_exit() {
+  echo "[!] ERROR: $1" >&2
+  logger -t pia_wireguard "ERROR: $1"
+  exit 1
+}
+
 init_script() {
   echo '[ ] Initializing script...'
   # Load config
@@ -24,8 +31,8 @@ init_script() {
   [ -f pia_config ] && . ./pia_config
   
   # Validate required variables
-  [ -z "${pia_user:-}" ] && { echo '[!] ERROR: pia_user not set'; exit 1; }
-  [ -z "${pia_pass:-}" ] && { echo '[!] ERROR: pia_pass not set'; exit 1; }
+  [ -z "${pia_user:-}" ] && error_exit "pia_user not set"
+  [ -z "${pia_pass:-}" ] && error_exit "pia_pass not set"
   
   # Set default region if not set
   if [ -z "${pia_vpn:-}" ]; then
@@ -39,7 +46,7 @@ init_script() {
   fi
   # Validate pia_pf format (must be IP:PORT or false)
   if [ "${pia_pf}" != 'false' ]; then
-    echo "${pia_pf}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}:[0-9]\{1,5\}$' || { echo "[!] ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:22)"; exit 1; }
+    echo "${pia_pf}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}:[0-9]\{1,5\}$' || error_exit "pia_pf must be in format IP:PORT (e.g., 192.168.1.10:22)"
   fi
   # Set default bypass IPs if not set (Google RCS servers)
   if [ -z "${pia_bypass:-}" ]; then
@@ -49,7 +56,7 @@ init_script() {
   # Validate bypass IPs (prevent injection)
   if [ "${pia_bypass}" != 'false' ]; then
     for ip in ${pia_bypass}; do
-      echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || { echo "[!] ERROR: Invalid IP in pia_bypass: ${ip}"; exit 1; }
+      echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || error_exit "Invalid IP in pia_bypass: ${ip}"
     done
   fi
   # Set default DuckDNS if not set
@@ -59,7 +66,7 @@ init_script() {
   fi
   # Validate pia_duckdns format (must be DOMAIN:TOKEN or false)
   if [ "${pia_duckdns}" != 'false' ]; then
-    echo "${pia_duckdns}" | grep -q ':' || { echo "[!] ERROR: pia_duckdns must be in format DOMAIN:TOKEN"; exit 1; }
+    echo "${pia_duckdns}" | grep -q ':' || error_exit "pia_duckdns must be in format DOMAIN:TOKEN"
   fi
   
   # Save credentials to config (preserve other variables)
@@ -80,8 +87,8 @@ EOF
 
 init_module() {
   echo '[ ] Initializing WireGuard...'
-  modprobe wireguard || { echo "[!] ERROR: Failed to load wireguard module"; exit 1; }
-  ip link show | grep -q 'wg0' || ip link add wg0 type wireguard || { echo "[!] ERROR: Failed to create wg0 interface"; exit 1; }
+  modprobe wireguard || error_exit "Failed to load wireguard module"
+  ip link show | grep -q 'wg0' || ip link add wg0 type wireguard || error_exit "Failed to create wg0 interface"
   echo '[+] WireGuard ready'
 }
 
@@ -100,7 +107,7 @@ get_cert() {
   # Download certificate
   local var_cert
   var_cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
-  [ -n "${var_cert}" ] || { echo "[!] ERROR: Certificate download failed"; exit 1; }
+  [ -n "${var_cert}" ] || error_exit "Certificate download failed"
   
   # Save to config (base64 encoded using PHP)
   local var_cert_encoded
@@ -149,7 +156,7 @@ EOF
   )
   var_php=$(echo "${var_php}" | sed "s/REGION_ID/${pia_vpn}/g")
   vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -r "${var_php}")
-  [ -n "${vars_region}" ] || { echo "[!] ERROR: Failed to fetch region info"; exit 1; }
+  [ -n "${vars_region}" ] || error_exit "Failed to fetch region info"
   printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "${vars_region}" > pia_config
   echo '[+] Region info ready'
 }
@@ -167,19 +174,19 @@ get_token() {
   fi
   
   # Validate required variables
-  [ -z "${pia_user:-}" ] && { echo "[!] ERROR: pia_user not set"; exit 1; }
-  [ -z "${pia_pass:-}" ] && { echo "[!] ERROR: pia_pass not set"; exit 1; }
-  [ -z "${region_meta_cn:-}" ] && { echo "[!] ERROR: region_meta_cn not set"; exit 1; }
-  [ -z "${region_meta_ip:-}" ] && { echo "[!] ERROR: region_meta_ip not set"; exit 1; }
-  [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
+  [ -z "${pia_user:-}" ] && error_exit "pia_user not set"
+  [ -z "${pia_pass:-}" ] && error_exit "pia_pass not set"
+  [ -z "${region_meta_cn:-}" ] && error_exit "region_meta_cn not set"
+  [ -z "${region_meta_ip:-}" ] && error_exit "region_meta_ip not set"
+  [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Write certificate file (needed by curl)
   echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
-  [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
+  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   local var_token
   var_token=$(curl --retry 5 --retry-all-errors -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_meta_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_meta_cn}/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
   # Remove certificate file
   rm -f pia_tmp_cert
-  [ -n "${var_token}" ] || { echo "[!] ERROR: Failed to generate token"; exit 1; }
+  [ -n "${var_token}" ] || error_exit "Failed to generate token"
   printf "%s\n%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" "token=\"${var_token}\"" > pia_config
   echo '[+] Token ready'
 }
@@ -217,15 +224,15 @@ get_auth() {
     return 0
   fi
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] && { echo "[!] ERROR: region_wg_cn not set"; exit 1; }
-  [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
-  [ -z "${region_wg_port:-}" ] && { echo "[!] ERROR: region_wg_port not set"; exit 1; }
-  [ -z "${token:-}" ] && { echo "[!] ERROR: token not set"; exit 1; }
-  [ -z "${peer_pubkey:-}" ] && { echo "[!] ERROR: peer_pubkey not set"; exit 1; }
-  [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
+  [ -z "${region_wg_cn:-}" ] && error_exit "region_wg_cn not set"
+  [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
+  [ -z "${region_wg_port:-}" ] && error_exit "region_wg_port not set"
+  [ -z "${token:-}" ] && error_exit "token not set"
+  [ -z "${peer_pubkey:-}" ] && error_exit "peer_pubkey not set"
+  [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Write certificate file (needed by curl)
   echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
-  [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
+  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   local var_php vars_auth
   # PHP code to parse auth response
   var_php=$(cat <<'EOF'
@@ -238,7 +245,7 @@ EOF
   vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_wg_cn}:${region_wg_port}/addKey" | php -r "${var_php}")
   # Remove certificate file
   rm -f pia_tmp_cert
-  [ -n "${vars_auth}" ] || { echo "[!] ERROR: Failed to authenticate"; exit 1; }
+  [ -n "${vars_auth}" ] || error_exit "Failed to authenticate"
   printf "%s\n%s\n" "$(grep -v '^auth_' pia_config 2>/dev/null || true)" "${vars_auth}" > pia_config
   echo '[+] Auth ready'
 }
@@ -258,11 +265,11 @@ set_wg() {
     return 0
   fi
   # Validate required variables
-  [ -z "${peer_prvkey:-}" ] && { echo "[!] ERROR: peer_prvkey not set"; exit 1; }
-  [ -z "${auth_server_key:-}" ] && { echo "[!] ERROR: auth_server_key not set"; exit 1; }
-  [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
-  [ -z "${region_wg_port:-}" ] && { echo "[!] ERROR: region_wg_port not set"; exit 1; }
-  [ -z "${auth_peer_ip:-}" ] && { echo "[!] ERROR: auth_peer_ip not set"; exit 1; }
+  [ -z "${peer_prvkey:-}" ] && error_exit "peer_prvkey not set"
+  [ -z "${auth_server_key:-}" ] && error_exit "auth_server_key not set"
+  [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
+  [ -z "${region_wg_port:-}" ] && error_exit "region_wg_port not set"
+  [ -z "${auth_peer_ip:-}" ] && error_exit "auth_peer_ip not set"
   # Write private key file (needed by wg command)
   echo "${peer_prvkey}" > pia_tmp_prvkey
   # Remove existing peers
@@ -288,7 +295,7 @@ set_wg() {
     ip link set wg0 up && break
     var_attempt=$((var_attempt + 1))
   done
-  [ "${var_attempt}" -le 5 ] || { echo "[!] ERROR: Failed to bring up wg0 after 5 attempts"; exit 1; }
+  [ "${var_attempt}" -le 5 ] || error_exit "Failed to bring up wg0 after 5 attempts"
   # Disable IPv6 (PIA does not support it yet)
   sysctl -w net.ipv6.conf.wg0.disable_ipv6=1 >/dev/null 2>&1 || true
   echo '[+] WireGuard ready'
@@ -336,7 +343,7 @@ set_routes() {
   # Add local network route (keeps LAN traffic on local network)
   local var_lan_route
   var_lan_route=$(ip route show dev br0 | cut -d' ' -f1)
-  [ -n "${var_lan_route}" ] || { echo "[!] ERROR: No route found for br0"; exit 1; }
+  [ -n "${var_lan_route}" ] || error_exit "No route found for br0"
   ip route add "${var_lan_route}" dev br0 table 1337
   # Set default route through VPN
   ip route add default dev wg0 table 1337
@@ -399,13 +406,13 @@ get_portforward() {
     return 0
   fi
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] && { echo "[!] ERROR: region_wg_cn not set"; exit 1; }
-  [ -z "${auth_server_vip:-}" ] && { echo "[!] ERROR: auth_server_vip not set"; exit 1; }
-  [ -z "${token:-}" ] && { echo "[!] ERROR: token not set"; exit 1; }
-  [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
+  [ -z "${region_wg_cn:-}" ] && error_exit "region_wg_cn not set"
+  [ -z "${auth_server_vip:-}" ] && error_exit "auth_server_vip not set"
+  [ -z "${token:-}" ] && error_exit "token not set"
+  [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Write certificate file (needed by curl)
   echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
-  [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
+  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   # Request port forward signature
   local var_php vars_portforward
   var_php=$(cat <<'EOF'
@@ -418,7 +425,7 @@ EOF
   vars_portforward=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_wg_cn}:19999/getSignature" --interface wg0 | php -r "${var_php}")
   # Remove certificate file
   rm -f pia_tmp_cert
-  [ -n "${vars_portforward}" ] || { echo "[!] ERROR: Failed to get port forward"; exit 1; }
+  [ -n "${vars_portforward}" ] || error_exit "Failed to get port forward"
   # Save to config
   printf "%s\n%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" "${vars_portforward}" > pia_config
   echo '[+] Port forward ready'
@@ -430,18 +437,18 @@ set_portforward() {
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] && { echo "[!] ERROR: region_wg_cn not set"; exit 1; }
-  [ -z "${auth_server_vip:-}" ] && { echo "[!] ERROR: auth_server_vip not set"; exit 1; }
-  [ -z "${portforward_signature:-}" ] && { echo "[!] ERROR: portforward_signature not set"; exit 1; }
-  [ -z "${portforward_payload:-}" ] && { echo "[!] ERROR: portforward_payload not set"; exit 1; }
-  [ -z "${portforward_port:-}" ] && { echo "[!] ERROR: portforward_port not set"; exit 1; }
-  [ -z "${pia_pf:-}" ] && { echo "[!] ERROR: pia_pf not set"; exit 1; }
-  [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
+  [ -z "${region_wg_cn:-}" ] && error_exit "region_wg_cn not set"
+  [ -z "${auth_server_vip:-}" ] && error_exit "auth_server_vip not set"
+  [ -z "${portforward_signature:-}" ] && error_exit "portforward_signature not set"
+  [ -z "${portforward_payload:-}" ] && error_exit "portforward_payload not set"
+  [ -z "${portforward_port:-}" ] && error_exit "portforward_port not set"
+  [ -z "${pia_pf:-}" ] && error_exit "pia_pf not set"
+  [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Validate pia_pf format (must be IP:PORT)
-  echo "${pia_pf}" | grep -q '^[0-9.]\+:[0-9]\+$' || { echo "[!] ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"; exit 1; }
+  echo "${pia_pf}" | grep -q '^[0-9.]\+:[0-9]\+$' || error_exit "pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"
   # Write certificate file (needed by curl)
   echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
-  [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
+  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message
   var_bind_response=$(curl -sGm 5 --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_wg_cn}:19999/bindPort" --interface wg0)
@@ -474,27 +481,27 @@ set_duckdns() {
   [ -f pia_config ] && . ./pia_config
 
   # Validate and split pia_duckdns (format: domain:token)
-  [ -z "${pia_duckdns:-}" ] && { echo "[!] ERROR: pia_duckdns not set"; exit 1; }
-  echo "${pia_duckdns}" | grep -q ':' || { echo "[!] ERROR: pia_duckdns must be in format DOMAIN:TOKEN"; exit 1; }
+  [ -z "${pia_duckdns:-}" ] && error_exit "pia_duckdns not set"
+  echo "${pia_duckdns}" | grep -q ':' || error_exit "pia_duckdns must be in format DOMAIN:TOKEN"
   
   local var_domain var_token
   var_domain="${pia_duckdns%%:*}"
   var_token="${pia_duckdns#*:}"
  
-  [ -z "${var_domain}" ] && { echo "[!] ERROR: DuckDNS domain is empty"; exit 1; }
-  [ -z "${var_token}" ] && { echo "[!] ERROR: DuckDNS token is empty"; exit 1; }
-  [ -z "${portforward_port:-}" ] && { echo "[!] ERROR: portforward_port not set (port forwarding must be enabled)"; exit 1; }
-  [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
+  [ -z "${var_domain}" ] && error_exit "DuckDNS domain is empty"
+  [ -z "${var_token}" ] && error_exit "DuckDNS token is empty"
+  [ -z "${portforward_port:-}" ] && error_exit "portforward_port not set (port forwarding must be enabled)"
+  [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
  
   # Update DuckDNS A record (IP address)
   local var_response_ip
   var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}")
-  [ "${var_response_ip}" = "OK" ] || { echo "[!] ERROR: DuckDNS IP update failed: ${var_response_ip}"; exit 1; }
+  [ "${var_response_ip}" = "OK" ] || error_exit "DuckDNS IP update failed: ${var_response_ip}"
  
   # Update DuckDNS TXT record (port number)
   local var_response_txt
   var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}")
-  [ "${var_response_txt}" = "OK" ] || { echo "[!] ERROR: DuckDNS TXT update failed: ${var_response_txt}"; exit 1; }
+  [ "${var_response_txt}" = "OK" ] || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
  
   echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"
 }
@@ -523,7 +530,12 @@ if [ "${pia_pf:-false}" != 'false' ]; then
   fi
 fi
 
-### OPTIONAL ###
-### Force wireguard traffic over specific interface
-# ip route list metric 50 | while read -r r; do ip route del "${r}"; done
-# ip route add ${region_wg_ip}/32 via 10.71.0.1 dev wlp2s0 metric 50
+### OPTIONAL
+### Force wireguard traffic over specific interface (this is just an example)
+# if ! ip route show | grep -q "${region_wg_ip}/32 via 10.71.0.1 dev wlp2s0 metric 50"; then
+#   ip route list metric 50 | while read -r r; do ip route del "${r}"; done
+#   ip route add ${region_wg_ip}/32 via 10.71.0.1 dev wlp2s0 metric 50
+# fi
+
+# Log successful completion
+logger -t pia_wireguard "Script completed successfully (region: ${pia_vpn:-unknown})"

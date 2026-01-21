@@ -190,7 +190,10 @@ set_wg() {
   # shellcheck disable=SC1091,SC2154
   . ./pia_config
   # Skip if WireGuard already configured (idempotent)
-  if ip link show wg0 2>/dev/null | grep -q 'state UP' && ip addr show wg0 2>/dev/null | grep -q "$auth_peer_ip" && [ "$(wg show wg0 peers 2>/dev/null | wc -l)" -gt 0 ]; then
+  if ip link show wg0 2>/dev/null | grep -q 'state UP' && \
+     ip addr show wg0 2>/dev/null | grep -q "$auth_peer_ip" && \
+     wg show wg0 peers 2>/dev/null | grep -q "^${auth_server_key}$" && \
+     [ "$(wg show wg0 peers 2>/dev/null | wc -l)" -eq 1 ]; then
     echo 'WireGuard already configured'
     echo 'WireGuard ready'
     return 0

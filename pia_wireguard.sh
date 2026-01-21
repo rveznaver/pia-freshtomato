@@ -88,8 +88,18 @@ get_region() {
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   
-  # Skip if region info already exists (idempotent)
-  if [ -n "${region_meta_cn:-}" ] && [ -n "${region_wg_cn:-}" ]; then
+  # Check if region changed (cascade invalidation)
+  if [ -n "${region_id:-}" ] && [ "${region_id}" != "$pia_vpn" ]; then
+    echo "Region changed from $region_id to $pia_vpn, clearing dependent data..."
+    # Clear region, token, auth, and portforward data
+    printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^portforward_' pia_config 2>/dev/null || true)" > pia_config
+    # Reload config after clearing
+    # shellcheck disable=SC1091
+    [ -f pia_config ] && . ./pia_config
+  fi
+
+  # Skip if region info already exists for current region (idempotent)
+  if [ -n "${region_meta_cn:-}" ] && [ -n "${region_wg_cn:-}" ] && [ "${region_id:-}" = "$pia_vpn" ]; then
     echo 'Region info already exists'
     echo 'Region info ready'
     return 0
@@ -102,6 +112,7 @@ get_region() {
     if (!$r) die("ERROR: Region 'REGION_ID' not found\n");
     $mt = $r->servers->meta[0];
     $wg = $r->servers->wg[0];
+    echo "region_id=\"REGION_ID\"\n";
     echo "region_meta_cn=\"$mt->cn\"\n";
     echo "region_meta_ip=\"$mt->ip\"\n";
     echo "region_wg_cn=\"$wg->cn\"\n";

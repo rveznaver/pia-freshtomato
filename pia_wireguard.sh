@@ -437,9 +437,18 @@ set_portforward() {
   echo "${certificate}" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
   [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
   # Bind port with PIA (always refresh binding)
-  curl -sGm 5 --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_wg_cn}:19999/bindPort" --interface wg0
+  local var_bind_response var_bind_status var_bind_message
+  var_bind_response=$(curl -sGm 5 --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_wg_cn}:19999/bindPort" --interface wg0)
   # Remove certificate file
   rm -f pia_tmp_cert
+  # Parse response
+  var_bind_status=$(echo "${var_bind_response}" | php -r 'echo json_decode(stream_get_contents(STDIN))->status ?? "";')
+  var_bind_message=$(echo "${var_bind_response}" | php -r 'echo json_decode(stream_get_contents(STDIN))->message ?? "";')
+  if [ "${var_bind_status}" = "OK" ]; then
+    echo "[*] Port binding: ${var_bind_message}"
+  else
+    echo "[!] WARNING: Port bind failed: ${var_bind_response}"
+  fi
   # Skip NAT configuration if already set (idempotent)
   if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}" 2>/dev/null; then
     echo '[=] Port forward NAT already configured'

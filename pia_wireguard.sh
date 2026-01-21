@@ -18,7 +18,7 @@ trap 'rm -f pia_tmp_*' EXIT
 
 init_script() {
   echo '[ ] Initializing script...'
-  # Load existing config if available
+  # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   
@@ -36,6 +36,11 @@ init_script() {
     echo '[*] pia_pf (port forwarding) not set, defaulting to false'
     pia_pf='false'
   fi
+  # Set default bypass IPs if not set (Google RCS servers)
+  if [ -z "${pia_bypass:-}" ]; then
+    echo '[*] pia_bypass not set, defaulting to Google RCS servers'
+    pia_bypass='216.239.36.127 216.239.36.131 216.239.36.132 216.239.36.133 216.239.36.134 216.239.36.135 216.239.36.145'
+  fi
   
   # Save credentials to config (preserve other variables)
   local vars_init
@@ -44,11 +49,12 @@ pia_user="${pia_user}"
 pia_pass="${pia_pass}"
 pia_vpn="${pia_vpn}"
 pia_pf="${pia_pf}"
+pia_bypass="${pia_bypass}"
 EOF
   )
   printf "%s\n%s\n" "$(grep -v '^pia_' pia_config 2>/dev/null || true)" "${vars_init}" > pia_config
   
-  echo '[+] Script initialized'
+  echo '[+] Script ready'
 }
 
 init_module() {
@@ -60,7 +66,7 @@ init_module() {
 
 get_cert() {
   echo '[ ] Downloading PIA certificate...'
-  # Load config to check if cert exists
+  # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   
@@ -85,7 +91,7 @@ get_cert() {
 
 get_region() {
   echo '[ ] Fetching PIA region info...'
-  # Load config to check if region info exists
+  # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   
@@ -129,7 +135,7 @@ EOF
 
 get_token() {
   echo '[ ] Generating PIA token...'
-  # Load region info from config
+  # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   
@@ -139,7 +145,7 @@ get_token() {
     return 0
   fi
   
-  # Validate required variables are loaded
+  # Validate required variables
   [ -z "${pia_user:-}" ] && { echo "[!] ERROR: pia_user not set"; exit 1; }
   [ -z "${pia_pass:-}" ] && { echo "[!] ERROR: pia_pass not set"; exit 1; }
   [ -z "${region_meta_cn:-}" ] && { echo "[!] ERROR: region_meta_cn not set"; exit 1; }
@@ -159,7 +165,7 @@ get_token() {
 
 gen_peer() {
   echo '[ ] Generating peer keys...'
-  # Load config to check if keys exist
+  # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   
@@ -189,7 +195,7 @@ get_auth() {
     echo '[=] Auth already exists'
     return 0
   fi
-  # Validate required variables are loaded
+  # Validate required variables
   [ -z "${region_wg_cn:-}" ] && { echo "[!] ERROR: region_wg_cn not set"; exit 1; }
   [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
   [ -z "${region_wg_port:-}" ] && { echo "[!] ERROR: region_wg_port not set"; exit 1; }
@@ -230,7 +236,7 @@ set_wg() {
     echo '[=] WireGuard already configured'
     return 0
   fi
-  # Validate required variables are loaded
+  # Validate required variables
   [ -z "${peer_prvkey:-}" ] && { echo "[!] ERROR: peer_prvkey not set"; exit 1; }
   [ -z "${auth_server_key:-}" ] && { echo "[!] ERROR: auth_server_key not set"; exit 1; }
   [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
@@ -321,6 +327,40 @@ set_routes() {
   echo '[+] Routes ready'
 }
 
+set_bypass() {
+  echo '[ ] Configuring VPN bypass...'
+  # Load config
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+  
+  # Check if all rules already exist (idempotent)
+  local var_existing=0 var_total=0
+  for ip in ${pia_bypass}; do
+    var_total=$((var_total + 1))
+    if ip rule list | grep -q "to ${ip} lookup main"; then
+      var_existing=$((var_existing + 1))
+    fi
+  done
+  
+  if [ ${var_existing} -eq ${var_total} ] && [ ${var_total} -gt 0 ]; then
+    echo '[=] VPN bypass already configured'
+    return 0
+  fi
+  
+  # Remove any existing bypass rules first (clean slate)
+  echo '[-] Removing existing bypass rules'
+  for ip in ${pia_bypass}; do
+    ip rule delete to "${ip}" lookup main 2>/dev/null || true
+  done
+  
+  # Add bypass rules
+  for ip in ${pia_bypass}; do
+    ip rule add to "${ip}" lookup main
+  done
+  
+  echo '[+] VPN bypass ready'
+}
+
 get_portforward() {
   echo '[ ] Requesting port forward...'
   # Load config
@@ -402,6 +442,10 @@ set_wg
 set_firewall
 set_routes
 
+if [ "${pia_bypass:-false}" != 'false' ]; then
+  set_bypass
+fi
+
 if [ "${pia_pf:-false}" != 'false' ]; then
   get_portforward
   set_portforward
@@ -409,5 +453,5 @@ fi
 
 ### OPTIONAL ###
 ### Force wireguard traffic over specific interface
-# ip route list metric 50 | while read r; do ip route del $r; done
-# ip route add $region_wg_ip/32 via 10.71.0.1 dev wlp2s0 metric 50
+# ip route list metric 50 | while read -r r; do ip route del "${r}"; done
+# ip route add ${region_wg_ip}/32 via 10.71.0.1 dev wlp2s0 metric 50

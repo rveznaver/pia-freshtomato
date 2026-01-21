@@ -103,7 +103,7 @@ get_cert() {
   
   # Save to config (base64 encoded using PHP)
   local var_cert_encoded
-  var_cert_encoded=$(echo "${var_cert}" | php -r 'echo base64_encode(file_get_contents("php://stdin"));')
+  var_cert_encoded=$(echo "${var_cert}" | php -r 'echo base64_encode(stream_get_contents(STDIN));')
   printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"${var_cert_encoded}\"" > pia_config
   
   echo '[+] Certificate ready'
@@ -134,7 +134,7 @@ get_region() {
   local var_php vars_region
   # PHP code to extract region info
   var_php=$(cat <<'EOF'
-    $r = current(array_filter(json_decode($argn)->regions, fn($x) => $x->id == "REGION_ID"));
+    $r = current(array_filter(json_decode(stream_get_contents(STDIN))->regions, fn($x) => $x->id == "REGION_ID"));
     if (!$r) die("ERROR: Region 'REGION_ID' not found\n");
     $mt = $r->servers->meta[0];
     $wg = $r->servers->wg[0];
@@ -147,7 +147,7 @@ get_region() {
 EOF
   )
   var_php=$(echo "${var_php}" | sed "s/REGION_ID/${pia_vpn}/g")
-  vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -R "${var_php}")
+  vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -r "${var_php}")
   [ -n "${vars_region}" ] || { echo "[!] ERROR: Failed to fetch region info"; exit 1; }
   printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "${vars_region}" > pia_config
   echo '[+] Region info ready'
@@ -172,7 +172,7 @@ get_token() {
   [ -z "${region_meta_ip:-}" ] && { echo "[!] ERROR: region_meta_ip not set"; exit 1; }
   [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
   [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
   local var_token
   var_token=$(curl --retry 5 --retry-all-errors -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_meta_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_meta_cn}/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
@@ -223,7 +223,7 @@ get_auth() {
   [ -z "${peer_pubkey:-}" ] && { echo "[!] ERROR: peer_pubkey not set"; exit 1; }
   [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
   [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
   local var_php vars_auth
   # PHP code to parse auth response
@@ -398,7 +398,7 @@ get_portforward() {
   [ -z "${token:-}" ] && { echo "[!] ERROR: token not set"; exit 1; }
   [ -z "${certificate:-}" ] && { echo "[!] ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
   [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
   # Request port forward signature
   local var_php vars_portforward
@@ -434,7 +434,7 @@ set_portforward() {
   # Validate pia_pf format (must be IP:PORT)
   echo "${pia_pf}" | grep -q '^[0-9.]\+:[0-9]\+$' || { echo "[!] ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"; exit 1; }
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > pia_tmp_cert
+  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
   [ -s pia_tmp_cert ] || { echo "[!] ERROR: Failed to decode certificate"; exit 1; }
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message

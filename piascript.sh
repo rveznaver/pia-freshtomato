@@ -30,7 +30,6 @@ retry() {
 
 init_script() {
   echo 'Initializing script...'
-  
   # Load existing config if available
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
@@ -106,7 +105,6 @@ get_region() {
   fi
   
   local var_php vars_region
-
   # PHP code to extract region info
   var_php=$(cat <<'EOF'
     $r = current(array_filter(json_decode($argn)->regions, fn($x) => $x->id == "REGION_ID"));
@@ -121,7 +119,6 @@ get_region() {
 EOF
 )
   var_php=$(echo "$var_php" | sed "s/REGION_ID/$pia_vpn/g")
-    
   vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -R "$var_php")
   [ -n "$vars_region" ] || { echo "ERROR: Failed to fetch region info"; exit 1; }
   printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "$vars_region" > pia_config
@@ -150,8 +147,8 @@ get_token() {
   echo 'Token ready'
 }
 
-gen_keys() {
-  echo 'Generating WireGuard keys...'
+gen_peer() {
+  echo 'Generating peer keys...'
   # Load config to check if keys exist
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
@@ -159,7 +156,6 @@ gen_keys() {
   # Skip if keys already exist (idempotent)
   if [ -n "${peer_prvkey:-}" ] && [ -n "${peer_pubkey:-}" ]; then
     echo 'Keys already exist'
-    echo "$peer_prvkey" > peer_prvkey
     echo 'Keys ready'
     return 0
   fi
@@ -168,12 +164,8 @@ gen_keys() {
   local var_prvkey var_pubkey
   var_prvkey=$(wg genkey)
   var_pubkey=$(echo "$var_prvkey" | wg pubkey)
-  
   # Save to config
-  printf "%s\n%s\n%s\n" "$(grep -v '^peer_prvkey=\|^peer_pubkey=' pia_config 2>/dev/null || true)" "peer_prvkey=\"$var_prvkey\"" "peer_pubkey=\"$var_pubkey\"" > pia_config
-  
-  # Write private key file (needed by wg command)
-  echo "$var_prvkey" > peer_prvkey
+  printf "%s\n%s\n%s\n" "$(grep -v '^peer_' pia_config 2>/dev/null || true)" "peer_prvkey=\"$var_prvkey\"" "peer_pubkey=\"$var_pubkey\"" > pia_config
   
   echo 'Keys ready'
 }
@@ -183,7 +175,7 @@ init_module
 get_cert
 get_region
 get_token
-gen_keys
+gen_peer
 
 echo 'Authenticating to PIA...'
 curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$pia_vpn_wg_ip:" --cacert pia_cert --data-urlencode "pt=$(cat pia_token)" --data-urlencode "pubkey=$peer_pubkey" "https://$pia_vpn_wg_cn:$pia_vpn_wg_port/addKey" | tr -d '\n' > pia_auth

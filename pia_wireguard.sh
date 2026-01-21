@@ -67,7 +67,6 @@ get_cert() {
   # Skip if certificate already exists (idempotent)
   if [ -n "${certificate:-}" ]; then
     echo 'Certificate already exists'
-    echo 'Certificate ready'
     return 0
   fi
   
@@ -101,7 +100,6 @@ get_region() {
   # Skip if region info already exists for current region (idempotent)
   if [ -n "${region_meta_cn:-}" ] && [ -n "${region_wg_cn:-}" ] && [ "${region_id:-}" = "$pia_vpn" ]; then
     echo 'Region info already exists'
-    echo 'Region info ready'
     return 0
   fi
   
@@ -136,7 +134,6 @@ get_token() {
   # Skip if token already exists (idempotent)
   if [ -n "${token:-}" ]; then
     echo 'Token already exists'
-    echo 'Token ready'
     return 0
   fi
   
@@ -167,7 +164,6 @@ gen_peer() {
   # Skip if keys already exist (idempotent)
   if [ -n "${peer_prvkey:-}" ] && [ -n "${peer_pubkey:-}" ]; then
     echo 'Keys already exist'
-    echo 'Keys ready'
     return 0
   fi
   
@@ -189,7 +185,6 @@ get_auth() {
   # Skip if auth already exists (idempotent)
   if [ -n "${auth_peer_ip:-}" ] && [ -n "${auth_server_key:-}" ] && [ -n "${auth_server_vip:-}" ]; then
     echo 'Auth already exists'
-    echo 'Auth ready'
     return 0
   fi
   # Validate required variables are loaded
@@ -230,7 +225,6 @@ set_wg() {
      wg show wg0 peers 2>/dev/null | grep -q "^${auth_server_key:-}$" && \
      [ "$(wg show wg0 peers 2>/dev/null | wc -l)" -eq 1 ]; then
     echo 'WireGuard already configured'
-    echo 'WireGuard ready'
     return 0
   fi
   # Validate required variables are loaded
@@ -274,7 +268,6 @@ set_firewall() {
      iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null && \
      iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null; then
     echo 'Firewall already configured'
-    echo 'Firewall ready'
     return 0
   fi
   # Remove all existing wg0 rules (clean slate)
@@ -300,7 +293,6 @@ set_routes() {
   # Skip if routes already configured (idempotent)
   if ip route show table 1337 | grep -q 'default dev wg0' && ip rule list | grep -q 'not from all fwmark 0xf0b lookup 1337'; then
     echo 'Routes already configured'
-    echo 'Routes ready'
     return 0
   fi
   # Clear custom routing table
@@ -327,7 +319,6 @@ get_portforward() {
   # Skip if port forward already exists (idempotent)
   if [ -n "${portforward_port:-}" ] && [ -n "${portforward_signature:-}" ] && [ -n "${portforward_payload:-}" ]; then
     echo 'Port forward already exists'
-    echo 'Port forward ready'
     return 0
   fi
   # Validate required variables
@@ -381,7 +372,6 @@ set_portforward() {
   # Skip NAT configuration if already set (idempotent)
   if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "$portforward_port" -j DNAT --to-destination "$pia_pf" 2>/dev/null; then
     echo 'Port forward NAT already configured'
-    echo 'Port forward NAT ready'
     return 0
   fi
   # Configure NAT rules

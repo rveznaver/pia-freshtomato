@@ -7,21 +7,25 @@ Script to set up PIA WireGuard on FreshTomato
 - **Modular**: Each stage is independent and can be run separately
 - **Region change detection**: Automatically clears dependent state when switching regions
 - **Port forwarding**: Optional port forwarding with automatic NAT configuration
+- **Split tunneling**: Optional VPN bypass for specific IPs (enabled by default for Google RCS)
+- **Dynamic DNS**: Optional DuckDNS updates with VPN IP and forwarded port
 - **Visual feedback**: Clear status indicators for all operations
+- **Input validation**: Validates all user inputs to prevent injection attacks
 
 ## Requirements
-- FreshTomato >= 2024.3 or compatible Linux distro
+- FreshTomato >= 2025.5 or compatible Linux distro
 - WireGuard kernel module (`wg`)
 - `curl` for API requests
 - `php` (or `php-cli`) for JSON parsing and base64 encoding
-- Standard POSIX tools: `sed`, `grep`, `awk`, `iptables`, `ip`
+- Standard POSIX tools: `sed`, `grep`, `awk`
 
 ## Setup
 
 ### Basic Usage (No Port Forwarding)
 ```bash
-scp -O pia_wireguard.sh root@<ROUTER_IP>:
 ssh root@<ROUTER_IP>
+curl -O https://raw.githubusercontent.com/rveznaver/pia-freshtomato/refs/heads/main/pia_wireguard.sh
+chmod +x pia_wireguard.sh
 pia_user='<USERNAME>' pia_pass='<PASSWORD>' ./pia_wireguard.sh
 ```
 
@@ -41,7 +45,14 @@ pia_user='<USERNAME>' \
 pia_pass='<PASSWORD>' \
 pia_vpn='uk_london' \
 pia_pf='192.168.1.100:8080' \
+pia_bypass='1.2.3.4 5.6.7.8' \
+pia_duckdns='mydomain:duckdns-token' \
 ./pia_wireguard.sh
+```
+
+### Disable VPN Bypass
+```bash
+pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.sh
 ```
 
 ## Configuration Variables
@@ -56,10 +67,14 @@ pia_pf='192.168.1.100:8080' \
 | `pia_duckdns` | No | `false` | DuckDNS dynamic DNS in format `DOMAIN:TOKEN` |
 
 ## Example Output
+
+### Basic Run (Defaults)
 ```
 [ ] Initializing script...
 [*] pia_vpn (region) not set, defaulting to ca_ontario (Ontario, Canada)
 [*] pia_pf (port forwarding) not set, defaulting to false
+[*] pia_bypass (split tunneling by IP) not set, defaulting to Google RCS servers
+[*] pia_duckdns (DuckDNS dynamic DNS) not set, defaulting to false
 [+] Script ready
 [ ] Initializing WireGuard...
 [+] WireGuard ready
@@ -74,23 +89,48 @@ pia_pf='192.168.1.100:8080' \
 [ ] Authenticating to PIA...
 [+] Auth ready
 [ ] Configuring WireGuard...
-[-] Removing existing peers
-[~] Retry 2/5 (backoff: 1s)...
 [+] WireGuard ready
 [ ] Configuring firewall...
-[-] Removing existing wg0 firewall rules
 [+] Firewall ready
 [ ] Configuring routes...
-[-] Flushing routing table 1337
-[-] Removing old policy rule
 [+] Routes ready
+[ ] Configuring VPN bypass...
+[+] VPN bypass ready
+```
+
+### With Port Forwarding and DuckDNS
+```
+[ ] Requesting port forward...
+[+] Port forward ready
+[ ] Configuring port forward NAT...
+[*] Port binding: timer refreshed
+[+] Port forward NAT ready
+[ ] Updating DuckDNS...
+[+] DNS records updated: mydomain.duckdns.org A=66.56.80.87 TXT=26640
+```
+
+### Subsequent Run (Idempotent)
+```
+[ ] Initializing script...
+[+] Script ready
+[ ] Initializing WireGuard...
+[+] WireGuard ready
+[=] Certificate already exists
+[=] Region info already exists
+[=] Token already exists
+[=] Keys already exist
+[=] Auth already exists
+[=] WireGuard already configured
+[=] Firewall already configured
+[=] Routes already configured
+[=] VPN bypass already configured
 ```
 
 ## Status Indicators
 - `[ ]` - Starting/in progress
 - `[+]` - Successfully completed
 - `[=]` - Skipped (already configured)
-- `[!]` - Error
+- `[!]` - Error or warning
 - `[~]` - Change detected / Retry in progress
 - `[*]` - Informational message
 - `[-]` - Cleanup action

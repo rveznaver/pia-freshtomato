@@ -126,6 +126,7 @@ get_region() {
   # Check if region changed (cascade invalidation)
   if [ -n "${region_id:-}" ] && [ "${region_id}" != "${pia_vpn}" ]; then
     echo "[~] Region changed from ${region_id} to ${pia_vpn}, clearing dependent data..."
+    logger -t pia_wireguard "Region changed from ${region_id} to ${pia_vpn}"
     # Clear region, token, auth, and portforward data
     printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^portforward_' pia_config 2>/dev/null || true)" > pia_config
     # Reload config after clearing
@@ -362,7 +363,11 @@ set_bypass() {
   [ -f pia_config ] && . ./pia_config
 
   # Load required kernel modules for ipset support
-  modprobe -a ip_set ip_set_hash_ip xt_set 2>/dev/null || { echo "[!] WARNING: ipset modules not available, skipping VPN bypass"; return 0; }
+  if ! modprobe -a ip_set ip_set_hash_ip xt_set 2>/dev/null; then
+    echo "[!] WARNING: ipset modules not available, skipping VPN bypass"
+    logger -t pia_wireguard "WARNING: Skipping VPN bypass"
+    return 0
+  fi
 
   # Check if already configured with current IPs (idempotent)
   if ipset list pia_bypass >/dev/null 2>&1 && \
@@ -376,6 +381,7 @@ set_bypass() {
       return 0
     fi
     echo '[~] Bypass IPs changed, reconfiguring...'
+    logger -t pia_wireguard "Bypass IPs changed"
   fi
 
   # Create or flush ipset
@@ -461,6 +467,7 @@ set_portforward() {
     echo "[*] Port binding: ${var_bind_message}"
   else
     echo "[!] WARNING: Port bind failed: ${var_bind_response}"
+    logger -t pia_wireguard "WARNING: Port bind failed"
   fi
   # Skip NAT configuration if already set (idempotent)
   if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}" 2>/dev/null; then
@@ -506,6 +513,8 @@ set_duckdns() {
   echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"
 }
 
+logger -t pia_wireguard "PIA WireGuard script started"
+
 init_script
 init_module
 get_cert
@@ -537,5 +546,4 @@ fi
 #   ip route add ${region_wg_ip}/32 via 10.71.0.1 dev wlp2s0 metric 50
 # fi
 
-# Log successful completion
-logger -t pia_wireguard "Script completed successfully (region: ${pia_vpn:-unknown})"
+logger -t pia_wireguard "PIA WireGuard script completed successfully"

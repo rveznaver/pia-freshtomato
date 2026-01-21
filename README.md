@@ -53,6 +53,7 @@ pia_pf='192.168.1.100:8080' \
 | `pia_vpn` | No | `ca_ontario` | PIA region ID (e.g., `us_california`, `uk_london`) |
 | `pia_pf` | No | `false` | Port forwarding destination in format `IP:PORT` |
 | `pia_bypass` | No | Google RCS IPs | Space-separated IPs to bypass VPN (set to `false` to disable) |
+| `pia_duckdns` | No | `false` | DuckDNS dynamic DNS in format `DOMAIN:TOKEN` |
 
 ## Example Output
 ```
@@ -111,6 +112,7 @@ The script runs through these stages sequentially:
 11. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
 12. **get_portforward** (optional): Requests port forwarding from PIA
 13. **set_portforward** (optional): Configures NAT rules for port forwarding
+14. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
 
 All configuration is saved to `pia_config` file for persistence across runs.
 
@@ -150,16 +152,30 @@ pia_user='user' pia_pass='pass' pia_bypass='1.2.3.4 5.6.7.8' ./pia_wireguard.sh
 The bypass works by adding `ip rule` entries that route specified IPs through the main routing table instead of the VPN.
 
 ### Expose acquired port on the internet
-1. create an account on https://www.duckdns.org/
-2. add to `pia_refresh.sh`:
+
+The script has built-in support for DuckDNS dynamic DNS updates.
+
+**Setup:**
+1. Create an account on https://www.duckdns.org/
+2. Create a domain (e.g., `myserver`)
+3. Get your token from the DuckDNS dashboard
+4. Run the script:
+
 ```bash
-# update duckdns
-duckdns_token='<REDACTED>'
-duckdns_domain='<REDACTED>'
-curl -sGm 5 "https://www.duckdns.org/update?domains=$duckdns_domain&token=$duckdns_token&ip=$pia_vpn_wg_ip"
-curl -sGm 5 "https://www.duckdns.org/update?domains=$duckdns_domain&token=$duckdns_token&txt=$pia_port"
+pia_user='user' \
+pia_pass='pass' \
+pia_pf='192.168.1.100:22' \
+pia_duckdns='myserver:your-duckdns-token' \
+./pia_wireguard.sh
 ```
-3. connect using:
+
+**Connect using:**
 ```bash
-ssh $(dig +short YOURDOMAIN.duckdns.org) -p $(dig +short TXT YOURDOMAIN.duckdns.org | tr -d '"')
+ssh $(dig +short myserver.duckdns.org) -p $(dig +short TXT myserver.duckdns.org | tr -d '"')
 ```
+
+The script automatically updates:
+- **A record**: Your VPN's public IP address (PIA server IP)
+- **TXT record**: The forwarded port number
+
+**Note:** DuckDNS only works when port forwarding (`pia_pf`) is enabled.

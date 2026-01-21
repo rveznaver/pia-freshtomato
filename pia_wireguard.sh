@@ -41,6 +41,10 @@ init_script() {
     echo '[*] pia_bypass not set, defaulting to Google RCS servers'
     pia_bypass='216.239.36.127 216.239.36.131 216.239.36.132 216.239.36.133 216.239.36.134 216.239.36.135 216.239.36.145'
   fi
+  # Set default DuckDNS settings if not set
+  if [ -z "${pia_duckdns:-}" ]; then
+    pia_duckdns='false'
+  fi
   
   # Save credentials to config (preserve other variables)
   local vars_init
@@ -50,6 +54,7 @@ pia_pass="${pia_pass}"
 pia_vpn="${pia_vpn}"
 pia_pf="${pia_pf}"
 pia_bypass="${pia_bypass}"
+pia_duckdns="${pia_duckdns}"
 EOF
   )
   printf "%s\n%s\n" "$(grep -v '^pia_' pia_config 2>/dev/null || true)" "${vars_init}" > pia_config
@@ -431,6 +436,43 @@ set_portforward() {
   echo '[+] Port forward NAT ready'
 }
 
+set_duckdns() {
+  echo '[ ] Updating DuckDNS...'
+  # Load config
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+
+  # Validate and split pia_duckdns (format: domain:token)
+  [ -z "${pia_duckdns:-}" ] && { echo "[!] ERROR: pia_duckdns not set"; exit 1; }
+  echo "${pia_duckdns}" | grep -q ':' || { echo "[!] ERROR: pia_duckdns must be in format DOMAIN:TOKEN"; exit 1; }
+  
+  local var_domain var_token
+  var_domain="${pia_duckdns%%:*}"
+  var_token="${pia_duckdns#*:}"
+ 
+  [ -z "${var_domain}" ] && { echo "[!] ERROR: DuckDNS domain is empty"; exit 1; }
+  [ -z "${var_token}" ] && { echo "[!] ERROR: DuckDNS token is empty"; exit 1; }
+  [ -z "${portforward_port:-}" ] && { echo "[!] ERROR: portforward_port not set (port forwarding must be enabled)"; exit 1; }
+  [ -z "${region_wg_ip:-}" ] && { echo "[!] ERROR: region_wg_ip not set"; exit 1; }
+ 
+  echo "[*] VPN IP: ${region_wg_ip}"
+ 
+  # Update DuckDNS A record (IP address)
+  local var_response_ip
+  var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}")
+  [ "${var_response_ip}" = "OK" ] || { echo "[!] ERROR: DuckDNS IP update failed: ${var_response_ip}"; exit 1; }
+  echo "[+] DuckDNS IP updated: ${var_domain}.duckdns.org -> ${region_wg_ip}"
+ 
+  # Update DuckDNS TXT record (port number)
+  local var_response_txt
+  var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}")
+  [ "${var_response_txt}" = "OK" ] || { echo "[!] ERROR: DuckDNS TXT update failed: ${var_response_txt}"; exit 1; }
+  echo "[+] DuckDNS TXT updated: ${var_domain}.duckdns.org TXT -> ${portforward_port}"
+ 
+  echo "[*] Connect using: ssh \$(dig +short ${var_domain}.duckdns.org) -p \$(dig +short TXT ${var_domain}.duckdns.org | tr -d '\"')"
+  echo '[+] DuckDNS ready'
+}
+
 init_script
 init_module
 get_cert
@@ -449,6 +491,10 @@ fi
 if [ "${pia_pf:-false}" != 'false' ]; then
   get_portforward
   set_portforward
+  
+  if [ "${pia_duckdns:-false}" != 'false' ]; then
+    set_duckdns
+  fi
 fi
 
 ### OPTIONAL ###

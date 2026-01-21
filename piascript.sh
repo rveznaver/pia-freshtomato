@@ -51,7 +51,7 @@ pia_user="$pia_user"
 pia_pass="$pia_pass"
 pia_vpn="$pia_vpn"
 EOF
-)
+  )
   printf "%s\n%s\n" "$(grep -v '^pia_user=\|^pia_pass=\|^pia_vpn=' pia_config 2>/dev/null || true)" "$vars_init" > pia_config
   
   echo 'Script initialized'
@@ -117,7 +117,7 @@ get_region() {
     echo "region_wg_ip=\"$wg->ip\"\n";
     echo "region_wg_port=\"1337\"\n";
 EOF
-)
+  )
   var_php=$(echo "$var_php" | sed "s/REGION_ID/$pia_vpn/g")
   vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -R "$var_php")
   [ -n "$vars_region" ] || { echo "ERROR: Failed to fetch region info"; exit 1; }
@@ -170,56 +170,139 @@ gen_peer() {
   echo 'Keys ready'
 }
 
+get_auth() {
+  echo 'Authenticating to PIA...'
+  # Load config
+  # shellcheck disable=SC1091
+  . ./pia_config
+  # Skip if auth already exists (idempotent)
+  if [ -n "${auth_peer_ip:-}" ] && [ -n "${auth_server_key:-}" ] && [ -n "${auth_server_vip:-}" ]; then
+    echo 'Auth already exists'
+    echo 'Auth ready'
+    return 0
+  fi
+  # Validate required variables are loaded
+  # shellcheck disable=SC2154
+  [ -z "${region_wg_cn:-}" ] || [ -z "${region_wg_ip:-}" ] || [ -z "${region_wg_port:-}" ] || [ -z "${token:-}" ] || [ -z "${peer_pubkey:-}" ] && { echo "ERROR: Required variables not available"; exit 1; }
+  local var_php vars_auth
+  # PHP code to parse auth response
+  var_php=$(cat <<'EOF'
+    $d = json_decode(stream_get_contents(STDIN));
+    echo "auth_peer_ip=\"$d->peer_ip\"\n";
+    echo "auth_server_key=\"$d->server_key\"\n";
+    echo "auth_server_vip=\"$d->server_vip\"\n";
+EOF
+  )
+  vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "$region_wg_cn::$region_wg_ip:" --cacert pia_cert --data-urlencode "pt=$token" --data-urlencode "pubkey=$peer_pubkey" "https://$region_wg_cn:$region_wg_port/addKey" | php -r "$var_php")
+  [ -n "$vars_auth" ] || { echo "ERROR: Failed to authenticate"; exit 1; }
+  printf "%s\n%s\n" "$(grep -v '^auth_' pia_config 2>/dev/null || true)" "$vars_auth" > pia_config
+  echo 'Auth ready'
+}
+
+set_wg() {
+  echo 'Configuring WireGuard...'
+  # Load config
+  # shellcheck disable=SC1091,SC2154
+  . ./pia_config
+  # Skip if WireGuard already configured (idempotent)
+  if ip link show wg0 2>/dev/null | grep -q 'state UP' && ip addr show wg0 2>/dev/null | grep -q "$auth_peer_ip" && [ "$(wg show wg0 peers 2>/dev/null | wc -l)" -gt 0 ]; then
+    echo 'WireGuard already configured'
+    echo 'WireGuard ready'
+    return 0
+  fi
+  # Validate required variables are loaded
+  [ -z "${peer_prvkey:-}" ] || [ -z "${auth_server_key:-}" ] || [ -z "${region_wg_ip:-}" ] || [ -z "${region_wg_port:-}" ] || [ -z "${auth_peer_ip:-}" ] && { echo "ERROR: Required variables not available"; exit 1; }
+  # Write private key file (needed by wg command)
+  echo "$peer_prvkey" > tmp_peer_prvkey
+  # Remove existing peers
+  for p in $(wg show wg0 peers 2>/dev/null); do wg set wg0 peer "$p" remove; done
+  # Configure WireGuard
+  wg set wg0 fwmark 0xf0b private-key tmp_peer_prvkey peer "$auth_server_key" endpoint "$region_wg_ip:$region_wg_port" persistent-keepalive 25 allowed-ips '0.0.0.0/0'
+  # Remove private key file
+  rm -f tmp_peer_prvkey
+  ip addr flush dev wg0
+  ip addr replace "$auth_peer_ip" dev wg0
+  # Bring up interface with retry (often fails first attempt)
+  retry ip link set wg0 up
+  echo 'WireGuard ready'
+}
+
+set_routes() {
+  echo 'Configuring routes...'
+  # Skip if routes already configured (idempotent)
+  if ip route show table 1337 | grep -q 'default dev wg0' && ip rule list | grep -q 'not from all fwmark 0xf0b lookup 1337'; then
+    echo 'Routes already configured'
+    echo 'Routes ready'
+    return 0
+  fi
+  # Clear custom routing table
+  ip route flush table 1337
+  # Add local network route (keeps LAN traffic on local network)
+  ip route add "$(ip route show dev br0 | cut -d' ' -f1)" dev br0 table 1337
+  # Set default route through VPN
+  ip route add default dev wg0 table 1337
+  # Remove old policy rule if exists
+  ip rule delete fwmark 0xf0b 2>/dev/null || true
+  # Add policy rule: use table 1337 for all packets NOT marked with 0xf0b
+  ip rule add not fwmark 0xf0b table 1337
+  echo 'Routes ready'
+}
+
+set_firewall() {
+  echo 'Configuring firewall...'
+  # Skip if firewall already configured (idempotent)
+  if iptables -C INPUT -i wg0 -m state --state NEW -j DROP 2>/dev/null && \
+     iptables -C FORWARD -i wg0 -m state --state NEW -j DROP 2>/dev/null && \
+     iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null && \
+     iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null; then
+    echo 'Firewall already configured'
+    echo 'Firewall ready'
+    return 0
+  fi
+  # Remove all existing wg0 rules (clean slate)
+  for var_table in '' 'nat'; do
+    iptables-save ${var_table:+-t} "$var_table" | awk '/wg0/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
+      # shellcheck disable=SC2086
+      iptables ${var_table:+-t} "$var_table" $var_rule 2>/dev/null || true
+    done
+  done
+  # Block NEW incoming connections from VPN
+  iptables -I INPUT -i wg0 -m state --state NEW -j DROP
+  # Block NEW forwarded connections from VPN
+  iptables -I FORWARD -i wg0 -m state --state NEW -j DROP
+  # Allow all forwarded traffic going out through VPN
+  iptables -I FORWARD -o wg0 -j ACCEPT
+  # NAT/masquerade all traffic going out through VPN
+  iptables -t nat -I POSTROUTING -o wg0 -j MASQUERADE
+  echo 'Firewall ready'
+}
+
 init_script
 init_module
 get_cert
 get_region
 get_token
 gen_peer
-
-echo 'Authenticating to PIA...'
-curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$pia_vpn_wg_ip:" --cacert pia_cert --data-urlencode "pt=$(cat pia_token)" --data-urlencode "pubkey=$peer_pubkey" "https://$pia_vpn_wg_cn:$pia_vpn_wg_port/addKey" | tr -d '\n' > pia_auth
-peer_ip=$(cat pia_auth | php -R 'echo json_decode($argn)->peer_ip;')
-server_key=$(cat pia_auth | php -R 'echo json_decode($argn)->server_key;')
-server_vip=$(cat pia_auth | php -R 'echo json_decode($argn)->server_vip;')
+get_auth
+set_wg
+set_routes
+set_firewall
 
 ### OPTIONAL ###
 ### Force wireguard traffic over specific interface
 # ip route list metric 50 | while read r; do ip route del $r; done
-# ip route add $pia_vpn_wg_ip/32 via 10.71.0.1 dev wlp2s0 metric 50
+# ip route add $region_wg_ip/32 via 10.71.0.1 dev wlp2s0 metric 50
 ### Disable IPv6 with sysctl as PIA does not yet support it
 # sysctl net.ipv6.conf.wg0.disable_ipv6=1
 
-echo 'Configuring WireGuard...'
-for p in $(wg show wg0 peers); do wg set wg0 peer "$p" remove; done
-wg set wg0 fwmark 0xf0b private-key peer_prvkey peer "$server_key" endpoint "$pia_vpn_wg_ip:$pia_vpn_wg_port" persistent-keepalive 25 allowed-ips '0.0.0.0/0'
-ip addr flush dev wg0
-ip addr replace "$peer_ip" dev wg0
-sleep 5
-ip link set wg0 up
-
-echo 'Configuring routes...'
-ip route flush table 1337
-ip route add $(ip route show dev br0 | cut -d' ' -f1) dev br0 table 1337
-ip route add default dev wg0 table 1337
-ip rule delete fwmark 0xf0b # ignore RNETLINK error
-ip rule add not fwmark 0xf0b table 1337
-
-echo 'Configuring NAT...'
-iptables-save | grep -v wg0 | iptables-restore
-iptables -I INPUT -i wg0 -m state --state NEW -j DROP
-iptables -I FORWARD -i wg0 -m state --state NEW -j DROP
-iptables -I FORWARD -o wg0 -j ACCEPT
-iptables -t nat -I POSTROUTING -o wg0 -j MASQUERADE
-
 echo 'Requesting port forward...'
-curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "token=$(cat pia_token)" "https://$pia_vpn_wg_cn:19999/getSignature" --interface wg0 | tr -d '\n' > pia_paysig
+curl --retry 10 --retry-all-errors -GSs --connect-to "$pia_vpn_wg_cn::$auth_server_vip:" --cacert pia_cert --data-urlencode "token=$(cat pia_token)" "https://$pia_vpn_wg_cn:19999/getSignature" --interface wg0 | tr -d '\n' > pia_paysig
 pia_signature=$(cat pia_paysig | php -R 'echo json_decode($argn)->signature;')
 pia_payload=$(cat pia_paysig | php -R 'echo json_decode($argn)->payload;')
 pia_port=$(cat pia_paysig | php -R 'echo json_decode(base64_decode(json_decode($argn)->payload))->port;')
 
 echo 'Setting up port with NAT...'
-curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "payload=$pia_payload" --data-urlencode "signature=$pia_signature" "https://$pia_vpn_wg_cn:19999/bindPort" --interface wg0
+curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$auth_server_vip:" --cacert pia_cert --data-urlencode "payload=$pia_payload" --data-urlencode "signature=$pia_signature" "https://$pia_vpn_wg_cn:19999/bindPort" --interface wg0
 iptables -t nat -I PREROUTING -i wg0 -p tcp --dport $pia_port -j DNAT --to-destination 192.168.2.10:2022
 iptables -I FORWARD -i wg0 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT -d 192.168.2.10 -p tcp --dport 2022
 
@@ -238,7 +321,7 @@ pia_port=$(cat pia_paysig | php -R 'echo json_decode(base64_decode(json_decode($
 
 # scheduler config: every 15 mins
 # cd /tmp/home/root && ./pia_refresh
-logger "refresh PIA forward $pia_vpn_wg_ip:$pia_port - $(curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$server_vip:" --cacert pia_cert --data-urlencode "payload=${pia_payload}" --data-urlencode "signature=${pia_signature}" "https://${pia_vpn_wg_cn}:19999/bindPort" --interface wg0)"
+logger "refresh PIA forward $pia_vpn_wg_ip:$pia_port - $(curl -sGm 5 --connect-to "$pia_vpn_wg_cn::$auth_server_vip:" --cacert pia_cert --data-urlencode "payload=${pia_payload}" --data-urlencode "signature=${pia_signature}" "https://${pia_vpn_wg_cn}:19999/bindPort" --interface wg0)"
 EOF
 chmod +x pia_refresh
 

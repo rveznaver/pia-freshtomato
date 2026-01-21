@@ -13,21 +13,6 @@ set -eu  # Exit on error or undefined variable
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
-retry() {
-  local var_attempt=1 var_backoff=1
-  while [ $var_attempt -le 5 ]; do
-    if [ $var_attempt -gt 1 ]; then
-      echo "  Retry $var_attempt/5 (backoff: ${var_backoff}s)..."
-      sleep "$var_backoff"
-      var_backoff=$((var_backoff * 2))
-    fi
-    "$@" && return 0
-    var_attempt=$((var_attempt + 1))
-  done
-  echo "ERROR: Failed after 5 attempts: $*"
-  exit 1
-}
-
 init_script() {
   echo 'Initializing script...'
   # Load existing config if available
@@ -223,7 +208,17 @@ set_wg() {
   ip addr flush dev wg0
   ip addr replace "$auth_peer_ip" dev wg0
   # Bring up interface with retry (often fails first attempt)
-  retry ip link set wg0 up
+  local var_attempt=1 var_backoff=1
+  while [ $var_attempt -le 5 ]; do
+    if [ $var_attempt -gt 1 ]; then
+      echo "  Retry $var_attempt/5 (backoff: ${var_backoff}s)..."
+      sleep "$var_backoff"
+      var_backoff=$((var_backoff * 2))
+    fi
+    ip link set wg0 up && break
+    var_attempt=$((var_attempt + 1))
+  done
+  [ $var_attempt -le 5 ] || { echo "ERROR: Failed to bring up wg0 after 5 attempts"; exit 1; }
   echo 'WireGuard ready'
 }
 

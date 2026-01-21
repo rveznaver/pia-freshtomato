@@ -8,6 +8,7 @@ set -eu  # Exit on error or undefined variable
 # - wg kernel module for WireGuard
 # - curl for API requests
 # - php for JSON parsing and base64 encoding
+# - ipset for VPN bypass IP sets
 # - Standard POSIX tools: sed, grep, awk
 
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
@@ -352,33 +353,35 @@ set_bypass() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  
-  # Check if all rules already exist (idempotent)
-  local var_existing=0 var_total=0 var_rule_list
-  var_rule_list=$(ip rule list)
-  for ip in ${pia_bypass}; do
-    var_total=$((var_total + 1))
-    if echo "${var_rule_list}" | grep -q "to ${ip} lookup main"; then
-      var_existing=$((var_existing + 1))
+
+  # Check if already configured with current IPs (idempotent)
+  if ipset list pia_bypass >/dev/null 2>&1 && \
+     iptables -t mangle -C PREROUTING -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b 2>/dev/null; then
+    # Verify ipset contains exactly the current bypass IPs
+    local var_ipset_ips var_current_ips
+    var_ipset_ips=$(ipset list pia_bypass | grep -E '^[0-9]' | sort)
+    var_current_ips=$(for ip in ${pia_bypass}; do echo "${ip}"; done | sort)
+    if [ "${var_ipset_ips}" = "${var_current_ips}" ]; then
+      echo '[=] VPN bypass already configured'
+      return 0
     fi
-  done
-  
-  if [ "${var_existing}" -eq "${var_total}" ] && [ "${var_total}" -gt 0 ]; then
-    echo '[=] VPN bypass already configured'
-    return 0
+    echo '[~] Bypass IPs changed, reconfiguring...'
   fi
-  
-  # Remove any existing bypass rules first (clean slate)
-  echo '[-] Removing existing bypass rules'
+
+  # Create or flush ipset
+  ipset create pia_bypass hash:ip -exist 2>/dev/null
+  ipset flush pia_bypass
+
+  # Add bypass IPs to ipset
   for ip in ${pia_bypass}; do
-    ip rule delete to "${ip}" lookup main 2>/dev/null || true
+    ipset add pia_bypass "${ip}"
   done
-  
-  # Add bypass rules
-  for ip in ${pia_bypass}; do
-    ip rule add to "${ip}" lookup main
-  done
-  
+
+  # Remove old mangle rule if exists
+  iptables -t mangle -D PREROUTING -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b 2>/dev/null || true
+  # Mark packets destined to bypass IPs with fwmark 0xf0b (will use main table, bypassing VPN)
+  iptables -t mangle -A PREROUTING -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b
+
   echo '[+] VPN bypass ready'
 }
 

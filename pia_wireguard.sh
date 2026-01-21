@@ -8,7 +8,7 @@ set -eu  # Exit on error or undefined variable
 # - wg kernel module for WireGuard
 # - curl for API requests
 # - php for JSON parsing and base64 encoding
-# - ipset and xt_set kernel module for VPN bypass
+# - ipset with kernel modules: ip_set, ip_set_hash_ip, xt_set for VPN bypass
 # - Standard POSIX tools: sed, grep, awk
 
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
@@ -354,11 +354,8 @@ set_bypass() {
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
 
-  # Load xt_set kernel module for ipset support
-  if ! modprobe xt_set 2>/dev/null; then
-    echo "[!] WARNING: xt_set module not available, skipping VPN bypass"
-    return 0
-  fi
+  # Load required kernel modules for ipset support
+  modprobe -a ip_set ip_set_hash_ip xt_set 2>/dev/null || { echo "[!] WARNING: ipset modules not available, skipping VPN bypass"; return 0; }
 
   # Check if already configured with current IPs (idempotent)
   if ipset list pia_bypass >/dev/null 2>&1 && \

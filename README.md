@@ -17,7 +17,7 @@ Script to set up PIA WireGuard on FreshTomato
 - WireGuard kernel module (`wg`)
 - `curl` for API requests
 - `php` (or `php-cli`) for JSON parsing and base64 encoding
-- `ipset` and `xt_set` kernel module for VPN bypass
+- `ipset` with kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set` for VPN bypass
 - Standard POSIX tools: `sed`, `grep`, `awk`
 
 ## Setup
@@ -191,11 +191,12 @@ pia_user='user' pia_pass='pass' pia_bypass='1.2.3.4 5.6.7.8' ./pia_wireguard.sh
 ```
 
 The bypass works by:
-1. Creating an `ipset` named `pia_bypass` containing the IP addresses
-2. Using iptables mangle table to mark packets destined to these IPs with fwmark `0xf0b`
-3. The fwmark causes packets to use the main routing table instead of the VPN
+1. Loading required kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set`
+2. Creating an `ipset` named `pia_bypass` containing the IP addresses
+3. Using iptables mangle table to mark packets destined to these IPs with fwmark `0xf0b`
+4. The fwmark causes packets to use the main routing table instead of the VPN
 
-This approach is efficient and scalable compared to individual `ip rule` entries.
+**Note:** If ipset modules are not available, the script will skip VPN bypass and continue.
 
 ### Expose acquired port on the internet
 

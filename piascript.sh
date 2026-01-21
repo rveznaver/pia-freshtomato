@@ -13,6 +13,9 @@ set -eu  # Exit on error or undefined variable
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
+# Cleanup temporary files on exit
+trap 'rm -f tmp_*' EXIT
+
 init_script() {
   echo 'Initializing script...'
   # Load existing config if available
@@ -50,8 +53,8 @@ EOF
 
 init_module() {
   echo 'Initializing WireGuard...'
-  modprobe wireguard || { echo "ERROR: Cannot load wireguard module"; exit 1; }
-  ip link show wg0 >/dev/null 2>&1 || ip link add wg0 type wireguard || { echo "ERROR: Cannot create wg0 interface"; exit 1; }
+  modprobe wireguard || { echo "ERROR: Failed to load wireguard module"; exit 1; }
+  ip link show wg0 >/dev/null 2>&1 || ip link add wg0 type wireguard || { echo "ERROR: Failed to create wg0 interface"; exit 1; }
   echo 'WireGuard ready'
 }
 
@@ -127,9 +130,14 @@ get_token() {
   fi
   
   # Validate required variables are loaded
-  [ -z "${region_meta_cn:-}" ] || [ -z "${region_meta_ip:-}" ] || [ -z "${certificate:-}" ] && { echo "ERROR: Region info not available"; exit 1; }
+  [ -z "${pia_user:-}" ] && { echo "ERROR: pia_user not set"; exit 1; }
+  [ -z "${pia_pass:-}" ] && { echo "ERROR: pia_pass not set"; exit 1; }
+  [ -z "${region_meta_cn:-}" ] && { echo "ERROR: region_meta_cn not set"; exit 1; }
+  [ -z "${region_meta_ip:-}" ] && { echo "ERROR: region_meta_ip not set"; exit 1; }
+  [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
   echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
+  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   local var_token
   var_token=$(curl --retry 5 --retry-all-errors -Ss -u "$pia_user:$pia_pass" --connect-to "$region_meta_cn::$region_meta_ip:" --cacert tmp_pia_cert "https://$region_meta_cn/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
   # Remove certificate file
@@ -174,9 +182,15 @@ get_auth() {
     return 0
   fi
   # Validate required variables are loaded
-  [ -z "${region_wg_cn:-}" ] || [ -z "${region_wg_ip:-}" ] || [ -z "${region_wg_port:-}" ] || [ -z "${token:-}" ] || [ -z "${peer_pubkey:-}" ] || [ -z "${certificate:-}" ] && { echo "ERROR: Required variables not available"; exit 1; }
+  [ -z "${region_wg_cn:-}" ] && { echo "ERROR: region_wg_cn not set"; exit 1; }
+  [ -z "${region_wg_ip:-}" ] && { echo "ERROR: region_wg_ip not set"; exit 1; }
+  [ -z "${region_wg_port:-}" ] && { echo "ERROR: region_wg_port not set"; exit 1; }
+  [ -z "${token:-}" ] && { echo "ERROR: token not set"; exit 1; }
+  [ -z "${peer_pubkey:-}" ] && { echo "ERROR: peer_pubkey not set"; exit 1; }
+  [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
   echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
+  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   local var_php vars_auth
   # PHP code to parse auth response
   var_php=$(cat <<'EOF'
@@ -209,7 +223,11 @@ set_wg() {
     return 0
   fi
   # Validate required variables are loaded
-  [ -z "${peer_prvkey:-}" ] || [ -z "${auth_server_key:-}" ] || [ -z "${region_wg_ip:-}" ] || [ -z "${region_wg_port:-}" ] || [ -z "${auth_peer_ip:-}" ] && { echo "ERROR: Required variables not available"; exit 1; }
+  [ -z "${peer_prvkey:-}" ] && { echo "ERROR: peer_prvkey not set"; exit 1; }
+  [ -z "${auth_server_key:-}" ] && { echo "ERROR: auth_server_key not set"; exit 1; }
+  [ -z "${region_wg_ip:-}" ] && { echo "ERROR: region_wg_ip not set"; exit 1; }
+  [ -z "${region_wg_port:-}" ] && { echo "ERROR: region_wg_port not set"; exit 1; }
+  [ -z "${auth_peer_ip:-}" ] && { echo "ERROR: auth_peer_ip not set"; exit 1; }
   # Write private key file (needed by wg command)
   echo "$peer_prvkey" > tmp_peer_prvkey
   # Remove existing peers
@@ -248,7 +266,10 @@ set_routes() {
   # Clear custom routing table
   ip route flush table 1337
   # Add local network route (keeps LAN traffic on local network)
-  ip route add "$(ip route show dev br0 | cut -d' ' -f1)" dev br0 table 1337
+  local var_lan_route
+  var_lan_route=$(ip route show dev br0 | cut -d' ' -f1)
+  [ -n "$var_lan_route" ] || { echo "ERROR: No route found for br0"; exit 1; }
+  ip route add "$var_lan_route" dev br0 table 1337
   # Set default route through VPN
   ip route add default dev wg0 table 1337
   # Remove old policy rule if exists
@@ -299,9 +320,13 @@ get_portforward() {
     return 0
   fi
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] || [ -z "${auth_server_vip:-}" ] || [ -z "${token:-}" ] || [ -z "${certificate:-}" ] && { echo "ERROR: Required variables not available"; exit 1; }
+  [ -z "${region_wg_cn:-}" ] && { echo "ERROR: region_wg_cn not set"; exit 1; }
+  [ -z "${auth_server_vip:-}" ] && { echo "ERROR: auth_server_vip not set"; exit 1; }
+  [ -z "${token:-}" ] && { echo "ERROR: token not set"; exit 1; }
+  [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
   # Write certificate file (needed by curl)
   echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
+  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   # Request port forward signature
   local var_php vars_portforward
   var_php=$(cat <<'EOF'
@@ -326,9 +351,18 @@ set_portforward() {
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] || [ -z "${auth_server_vip:-}" ] || [ -z "${portforward_signature:-}" ] || [ -z "${portforward_payload:-}" ] || [ -z "${portforward_port:-}" ] || [ -z "${pia_pf:-}" ] || [ -z "${certificate:-}" ] && { echo "ERROR: Required variables not available"; exit 1; }
+  [ -z "${region_wg_cn:-}" ] && { echo "ERROR: region_wg_cn not set"; exit 1; }
+  [ -z "${auth_server_vip:-}" ] && { echo "ERROR: auth_server_vip not set"; exit 1; }
+  [ -z "${portforward_signature:-}" ] && { echo "ERROR: portforward_signature not set"; exit 1; }
+  [ -z "${portforward_payload:-}" ] && { echo "ERROR: portforward_payload not set"; exit 1; }
+  [ -z "${portforward_port:-}" ] && { echo "ERROR: portforward_port not set"; exit 1; }
+  [ -z "${pia_pf:-}" ] && { echo "ERROR: pia_pf not set"; exit 1; }
+  [ -z "${certificate:-}" ] && { echo "ERROR: certificate not set"; exit 1; }
+  # Validate pia_pf format (must be IP:PORT)
+  echo "$pia_pf" | grep -q '^[0-9.]\+:[0-9]\+$' || { echo "ERROR: pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"; exit 1; }
   # Write certificate file (needed by curl)
   echo "$certificate" | php -r 'echo base64_decode(file_get_contents("php://stdin"));' > tmp_pia_cert
+  [ -s tmp_pia_cert ] || { echo "ERROR: Failed to decode certificate"; exit 1; }
   # Bind port with PIA (always refresh binding)
   curl -sGm 5 --connect-to "$region_wg_cn::$auth_server_vip:" --cacert tmp_pia_cert --data-urlencode "payload=$portforward_payload" --data-urlencode "signature=$portforward_signature" "https://$region_wg_cn:19999/bindPort" --interface wg0
   # Remove certificate file
@@ -357,7 +391,7 @@ set_wg
 set_routes
 set_firewall
 
-if [ "$pia_pf" != 'false' ]; then
+if [ "${pia_pf:-false}" != 'false' ]; then
   get_portforward
   set_portforward
 fi

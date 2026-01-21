@@ -4,7 +4,7 @@
 set -eu  # Exit on error or undefined variable
 
 # requirements:
-# - FreshTomato >= 2024.3 or some Linux distro
+# - FreshTomato >= 2025.5 or some Linux distro
 # - wg kernel module for WireGuard
 # - curl for API requests
 # - php for JSON parsing and base64 encoding
@@ -306,9 +306,9 @@ set_firewall() {
   # Remove all existing wg0 rules (clean slate)
   echo '[-] Removing existing wg0 firewall rules'
   for var_table in '' 'nat'; do
-    iptables-save ${var_table:+-t} "${var_table}" | awk '/wg0/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
+    iptables-save ${var_table:+-t "${var_table}"} | awk '/wg0/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
       # shellcheck disable=SC2086
-      iptables ${var_table:+-t} "${var_table}" ${var_rule} 2>/dev/null || true
+      iptables ${var_table:+-t "${var_table}"} ${var_rule} 2>/dev/null || true
     done
   done
   # Block NEW incoming connections from VPN

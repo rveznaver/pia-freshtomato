@@ -266,30 +266,6 @@ set_wg() {
   echo 'WireGuard ready'
 }
 
-set_routes() {
-  echo 'Configuring routes...'
-  # Skip if routes already configured (idempotent)
-  if ip route show table 1337 | grep -q 'default dev wg0' && ip rule list | grep -q 'not from all fwmark 0xf0b lookup 1337'; then
-    echo 'Routes already configured'
-    echo 'Routes ready'
-    return 0
-  fi
-  # Clear custom routing table
-  ip route flush table 1337
-  # Add local network route (keeps LAN traffic on local network)
-  local var_lan_route
-  var_lan_route=$(ip route show dev br0 | cut -d' ' -f1)
-  [ -n "$var_lan_route" ] || { echo "ERROR: No route found for br0"; exit 1; }
-  ip route add "$var_lan_route" dev br0 table 1337
-  # Set default route through VPN
-  ip route add default dev wg0 table 1337
-  # Remove old policy rule if exists
-  ip rule delete fwmark 0xf0b 2>/dev/null || true
-  # Add policy rule: use table 1337 for all packets NOT marked with 0xf0b
-  ip rule add not fwmark 0xf0b table 1337
-  echo 'Routes ready'
-}
-
 set_firewall() {
   echo 'Configuring firewall...'
   # Skip if firewall already configured (idempotent)
@@ -317,6 +293,30 @@ set_firewall() {
   # NAT/masquerade all traffic going out through VPN
   iptables -t nat -I POSTROUTING -o wg0 -j MASQUERADE
   echo 'Firewall ready'
+}
+
+set_routes() {
+  echo 'Configuring routes...'
+  # Skip if routes already configured (idempotent)
+  if ip route show table 1337 | grep -q 'default dev wg0' && ip rule list | grep -q 'not from all fwmark 0xf0b lookup 1337'; then
+    echo 'Routes already configured'
+    echo 'Routes ready'
+    return 0
+  fi
+  # Clear custom routing table
+  ip route flush table 1337
+  # Add local network route (keeps LAN traffic on local network)
+  local var_lan_route
+  var_lan_route=$(ip route show dev br0 | cut -d' ' -f1)
+  [ -n "$var_lan_route" ] || { echo "ERROR: No route found for br0"; exit 1; }
+  ip route add "$var_lan_route" dev br0 table 1337
+  # Set default route through VPN
+  ip route add default dev wg0 table 1337
+  # Remove old policy rule if exists
+  ip rule delete fwmark 0xf0b 2>/dev/null || true
+  # Add policy rule: use table 1337 for all packets NOT marked with 0xf0b
+  ip rule add not fwmark 0xf0b table 1337
+  echo 'Routes ready'
 }
 
 get_portforward() {
@@ -399,8 +399,8 @@ get_token
 gen_peer
 get_auth
 set_wg
-set_routes
 set_firewall
+set_routes
 
 if [ "${pia_pf:-false}" != 'false' ]; then
   get_portforward

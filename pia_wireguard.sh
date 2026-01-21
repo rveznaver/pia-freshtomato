@@ -38,11 +38,12 @@ init_script() {
   fi
   # Set default bypass IPs if not set (Google RCS servers)
   if [ -z "${pia_bypass:-}" ]; then
-    echo '[*] pia_bypass not set, defaulting to Google RCS servers'
+    echo '[*] pia_bypass (split tunneling by IP) not set, defaulting to Google RCS servers'
     pia_bypass='216.239.36.127 216.239.36.131 216.239.36.132 216.239.36.133 216.239.36.134 216.239.36.135 216.239.36.145'
   fi
-  # Set default DuckDNS settings if not set
+  # Set default DuckDNS if not set
   if [ -z "${pia_duckdns:-}" ]; then
+    echo '[*] pia_duckdns (DuckDNS dynamic DNS) not set, defaulting to false'
     pia_duckdns='false'
   fi
   

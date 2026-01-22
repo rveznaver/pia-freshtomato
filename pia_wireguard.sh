@@ -298,7 +298,7 @@ set_wg() {
   done
   [ "${var_attempt}" -le 5 ] || error_exit "Failed to bring up wg0 after 5 attempts"
   # Disable IPv6 (PIA does not support it yet)
-  sysctl -w net.ipv6.conf.wg0.disable_ipv6=1 >/dev/null 2>&1 || true
+  echo 1 > /proc/sys/net/ipv6/conf/wg0/disable_ipv6 2>/dev/null || true
   echo '[+] WireGuard ready'
 }
 

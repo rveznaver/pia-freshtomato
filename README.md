@@ -6,9 +6,11 @@ Script to set up PIA WireGuard on FreshTomato
 - **Robust**: Automatic retries with exponential backoff for flaky operations
 - **Modular**: Each stage is independent and can be run separately
 - **Region change detection**: Automatically clears dependent state when switching regions
-- **Port forwarding**: Optional port forwarding with automatic NAT configuration
+- **Port forwarding**: Forward to devices or router itself with automatic NAT configuration
 - **Split tunneling**: Optional VPN bypass for specific IPs (enabled by default for Google RCS)
 - **Dynamic DNS**: Optional DuckDNS updates with VPN IP and forwarded port
+- **Custom iptables chains**: Clean rule isolation using named chains (PIA_*)
+- **Syslog logging**: Automatic logging of errors, warnings, and important events
 - **Visual feedback**: Clear status indicators for all operations
 - **Input validation**: Validates all user inputs to prevent injection attacks
 
@@ -18,7 +20,7 @@ Script to set up PIA WireGuard on FreshTomato
 - `curl` for API requests
 - `php` (or `php-cli`) for JSON parsing and base64 encoding
 - `ipset` with kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set` for VPN bypass
-- Standard POSIX tools: `sed`, `grep`, `awk`
+- Standard POSIX tools: `sed`, `grep`
 
 ## Setup
 
@@ -30,9 +32,14 @@ chmod +x pia_wireguard.sh
 pia_user='<USERNAME>' pia_pass='<PASSWORD>' ./pia_wireguard.sh
 ```
 
-### With Port Forwarding
+### Forward to Another Device
 ```bash
-pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_pf='<LOCAL_IP>:<LOCAL_PORT>' ./pia_wireguard.sh
+pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_pf='192.168.1.100:8080' ./pia_wireguard.sh
+```
+
+### Forward to Router Itself
+```bash
+pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_pf='0.0.0.0:22' ./pia_wireguard.sh
 ```
 
 ### With Custom Region
@@ -63,7 +70,7 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 | `pia_user` | Yes | - | PIA username |
 | `pia_pass` | Yes | - | PIA password |
 | `pia_vpn` | No | `ca_ontario` | PIA region ID (e.g., `us_california`, `uk_london`) |
-| `pia_pf` | No | `false` | Port forwarding destination in format `IP:PORT` |
+| `pia_pf` | No | `false` | Port forwarding destination in format `IP:PORT` (use `0.0.0.0:PORT` for router) |
 | `pia_bypass` | No | Google RCS IPs | Space-separated IPs to bypass VPN (set to `false` to disable) |
 | `pia_duckdns` | No | `false` | DuckDNS dynamic DNS in format `DOMAIN:TOKEN` |
 
@@ -197,6 +204,47 @@ The bypass works by:
 4. The fwmark causes packets to use the main routing table instead of the VPN
 
 **Note:** If ipset modules are not available, the script will skip VPN bypass and continue.
+
+### Port Forwarding
+
+The script supports forwarding PIA's assigned port to:
+
+**Another device on your LAN:**
+```bash
+pia_pf='192.168.1.100:8080' ./pia_wireguard.sh
+```
+Uses DNAT to forward traffic to the specified device.
+
+**Router itself (e.g., SSH):**
+```bash
+pia_pf='0.0.0.0:22' ./pia_wireguard.sh
+```
+Uses REDIRECT (more efficient for local services) to forward to the router's SSH or other services.
+
+**Custom Chains:**
+
+The script uses custom iptables chains to isolate all PIA-related rules:
+- `PIA_INPUT` - Security rules for VPN input
+- `PIA_FORWARD` - Security rules for VPN forwarding
+- `PIA_POSTROUTING` - NAT masquerading
+- `PIA_NAT` - Port forwarding DNAT/REDIRECT rules
+- `PIA_PORTFORWARD` - Port access exceptions
+- `PIA_MANGLE` - VPN bypass packet marking
+
+This provides clean separation and makes debugging easier.
+
+### Syslog Logging
+
+The script automatically logs to syslog:
+- Script start and completion
+- All errors (specific error messages)
+- Warnings (non-fatal issues)
+- Important changes (region changes, config changes)
+
+View logs:
+```bash
+grep pia_wireguard /var/log/messages
+```
 
 ### Expose acquired port on the internet
 

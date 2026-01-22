@@ -9,7 +9,7 @@ set -eu  # Exit on error or undefined variable
 # - curl for API requests
 # - php for JSON parsing and base64 encoding
 # - ipset with kernel modules: ip_set, ip_set_hash_ip, xt_set for VPN bypass
-# - Standard POSIX tools: sed, grep, awk
+# - Standard POSIX tools: sed, grep
 
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli

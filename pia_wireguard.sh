@@ -469,16 +469,50 @@ set_portforward() {
     echo "[!] WARNING: Port bind failed: ${var_bind_response}"
     logger -t pia_wireguard "WARNING: Port bind failed"
   fi
-  # Skip NAT configuration if already set (idempotent)
-  if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}" 2>/dev/null; then
-    echo '[=] Port forward NAT already configured'
-    return 0
-  fi
-  # Configure NAT rules
+
+  # Parse IP and port from pia_pf
   local var_pf_ip="${pia_pf%:*}" var_pf_port="${pia_pf#*:}"
-  iptables -t nat -I PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}"
-  iptables -I FORWARD -i wg0 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT -d "${var_pf_ip}" -p tcp --dport "${var_pf_port}"
-  echo '[+] Port forward NAT ready'
+
+  if [ "${var_pf_ip}" = "0.0.0.0" ]; then
+    # Destination is router - use REDIRECT
+    if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j REDIRECT --to-ports "${var_pf_port}" 2>/dev/null && \
+       iptables -C INPUT -i wg0 -p tcp --dport "${var_pf_port}" -m state --state NEW -j ACCEPT 2>/dev/null; then
+      echo '[=] Port forward already configured'
+      return 0
+    fi
+  else
+    # Destination is another device - use DNAT
+    if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}" 2>/dev/null; then
+      echo '[=] Port forward NAT already configured'
+      return 0
+    fi
+  fi
+
+  # Configuration changed or doesn't exist - clean up old rules
+  if iptables-save -t nat | grep -q 'wg0.*-j.*\(REDIRECT\|DNAT\)'; then
+    echo '[-] Removing old port forwarding rules'
+    iptables-save -t nat | awk '/wg0.*-j.*(REDIRECT|DNAT)/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
+      # shellcheck disable=SC2086
+      iptables -t nat ${var_rule} 2>/dev/null || true
+    done
+    iptables-save | awk '/(INPUT|FORWARD).*wg0.*tcp.*(dport|--dport).*ACCEPT/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
+      # shellcheck disable=SC2086
+      iptables ${var_rule} 2>/dev/null || true
+    done
+  fi
+
+  # Add rules based on mode
+  if [ "${var_pf_ip}" = "0.0.0.0" ]; then
+    # Router mode - REDIRECT and INPUT
+    iptables -t nat -I PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j REDIRECT --to-ports "${var_pf_port}"
+    iptables -I INPUT -i wg0 -p tcp --dport "${var_pf_port}" -m state --state NEW -j ACCEPT
+    echo "[+] Port ${portforward_port} redirected to router port ${var_pf_port}"
+  else
+    # Forward mode - DNAT and FORWARD
+    iptables -t nat -I PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}"
+    iptables -I FORWARD -i wg0 -m state --state NEW,RELATED,ESTABLISHED -j ACCEPT -d "${var_pf_ip}" -p tcp --dport "${var_pf_port}"
+    echo "[+] Port ${portforward_port} forwarded to ${pia_pf}"
+  fi
 }
 
 set_duckdns() {

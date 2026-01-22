@@ -29,11 +29,11 @@ init_script() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  
+
   # Validate required variables
   [ -z "${pia_user:-}" ] && error_exit "pia_user not set"
   [ -z "${pia_pass:-}" ] && error_exit "pia_pass not set"
-  
+
   # Set default region if not set
   if [ -z "${pia_vpn:-}" ]; then
     echo '[*] pia_vpn (region) not set, defaulting to ca_ontario (Ontario, Canada)'
@@ -68,7 +68,7 @@ init_script() {
   if [ "${pia_duckdns}" != 'false' ]; then
     echo "${pia_duckdns}" | grep -q ':' || error_exit "pia_duckdns must be in format DOMAIN:TOKEN"
   fi
-  
+
   # Save credentials to config (preserve other variables)
   local vars_init
   vars_init=$(cat <<EOF
@@ -81,7 +81,7 @@ pia_duckdns="${pia_duckdns}"
 EOF
   )
   printf "%s\n%s\n" "$(grep -v '^pia_' pia_config 2>/dev/null || true)" "${vars_init}" > pia_config
-  
+
   echo '[+] Script ready'
 }
 
@@ -97,23 +97,23 @@ get_cert() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  
+
   # Skip if certificate already exists (idempotent)
   if [ -n "${certificate:-}" ]; then
     echo '[=] Certificate already exists'
     return 0
   fi
-  
+
   # Download certificate
   local var_cert
   var_cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
   [ -n "${var_cert}" ] || error_exit "Certificate download failed"
-  
+
   # Save to config (base64 encoded using PHP)
   local var_cert_encoded
   var_cert_encoded=$(echo "${var_cert}" | php -r 'echo base64_encode(stream_get_contents(STDIN));')
   printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"${var_cert_encoded}\"" > pia_config
-  
+
   echo '[+] Certificate ready'
 }
 
@@ -122,7 +122,7 @@ get_region() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  
+
   # Check if region changed (cascade invalidation)
   if [ -n "${region_id:-}" ] && [ "${region_id}" != "${pia_vpn}" ]; then
     echo "[~] Region changed from ${region_id} to ${pia_vpn}, clearing dependent data..."
@@ -139,7 +139,7 @@ get_region() {
     echo '[=] Region info already exists'
     return 0
   fi
-  
+
   local var_php vars_region
   # PHP code to extract region info
   var_php=$(cat <<'EOF'
@@ -167,13 +167,13 @@ get_token() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  
+
   # Skip if token already exists (idempotent)
   if [ -n "${token:-}" ]; then
     echo '[=] Token already exists'
     return 0
   fi
-  
+
   # Validate required variables
   [ -z "${pia_user:-}" ] && error_exit "pia_user not set"
   [ -z "${pia_pass:-}" ] && error_exit "pia_pass not set"
@@ -197,20 +197,20 @@ gen_peer() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  
+
   # Skip if keys already exist (idempotent)
   if [ -n "${peer_prvkey:-}" ] && [ -n "${peer_pubkey:-}" ]; then
     echo '[=] Keys already exist'
     return 0
   fi
-  
+
   # Generate new keys
   local var_prvkey var_pubkey
   var_prvkey=$(wg genkey)
   var_pubkey=$(echo "${var_prvkey}" | wg pubkey)
   # Save to config
   printf "%s\n%s\n%s\n" "$(grep -v '^peer_' pia_config 2>/dev/null || true)" "peer_prvkey=\"${var_prvkey}\"" "peer_pubkey=\"${var_pubkey}\"" > pia_config
-  
+
   echo '[+] Keys ready'
 }
 
@@ -304,30 +304,43 @@ set_wg() {
 
 set_firewall() {
   echo '[ ] Configuring firewall...'
-  # Skip if firewall already configured (idempotent)
-  if iptables -C INPUT -i wg0 -m state --state NEW -j DROP 2>/dev/null && \
-     iptables -C FORWARD -i wg0 -m state --state NEW -j DROP 2>/dev/null && \
-     iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null && \
-     iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null; then
+
+  # Check if chains exist and have rules (idempotent)
+  if iptables -L PIA_INPUT -n >/dev/null 2>&1 && \
+     iptables -L PIA_FORWARD -n >/dev/null 2>&1 && \
+     iptables -t nat -L PIA_POSTROUTING -n >/dev/null 2>&1 && \
+     iptables -t nat -L PIA_POSTROUTING -n 2>/dev/null | grep -q MASQUERADE; then
     echo '[=] Firewall already configured'
     return 0
   fi
-  # Remove all existing wg0 rules (clean slate)
-  echo '[-] Removing existing wg0 firewall rules'
-  for var_table in '' 'nat'; do
-    iptables-save ${var_table:+-t ${var_table}} | awk '/wg0/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
-      # shellcheck disable=SC2086
-      iptables ${var_table:+-t ${var_table}} ${var_rule} 2>/dev/null || true
-    done
-  done
-  # Block NEW incoming connections from VPN
-  iptables -I INPUT -i wg0 -m state --state NEW -j DROP
-  # Block NEW forwarded connections from VPN
-  iptables -I FORWARD -i wg0 -m state --state NEW -j DROP
-  # Allow all forwarded traffic going out through VPN
-  iptables -I FORWARD -o wg0 -j ACCEPT
-  # NAT/masquerade all traffic going out through VPN
-  iptables -t nat -I POSTROUTING -o wg0 -j MASQUERADE
+
+  # Create custom chains
+  iptables -N PIA_INPUT 2>/dev/null || true
+  iptables -N PIA_FORWARD 2>/dev/null || true
+  iptables -t nat -N PIA_POSTROUTING 2>/dev/null || true
+
+  # Flush chains (clean slate)
+  iptables -F PIA_INPUT
+  iptables -F PIA_FORWARD
+  iptables -t nat -F PIA_POSTROUTING
+
+  # Hook chains into main chains (remove old hooks first)
+  iptables -D INPUT -i wg0 -j PIA_INPUT 2>/dev/null || true
+  iptables -D FORWARD -i wg0 -j PIA_FORWARD 2>/dev/null || true
+  iptables -D FORWARD -o wg0 -j PIA_FORWARD 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -o wg0 -j PIA_POSTROUTING 2>/dev/null || true
+
+  iptables -I INPUT -i wg0 -j PIA_INPUT
+  iptables -I FORWARD -i wg0 -j PIA_FORWARD
+  iptables -I FORWARD -o wg0 -j PIA_FORWARD
+  iptables -t nat -I POSTROUTING -o wg0 -j PIA_POSTROUTING
+
+  # Add rules inside custom chains
+  iptables -A PIA_INPUT -m state --state NEW -j DROP
+  iptables -A PIA_FORWARD -i wg0 -m state --state NEW -j DROP
+  iptables -A PIA_FORWARD -o wg0 -j ACCEPT
+  iptables -t nat -A PIA_POSTROUTING -j MASQUERADE
+
   echo '[+] Firewall ready'
 }
 
@@ -371,7 +384,8 @@ set_bypass() {
 
   # Check if already configured with current IPs (idempotent)
   if ipset list pia_bypass >/dev/null 2>&1 && \
-     iptables -t mangle -C PREROUTING -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b 2>/dev/null; then
+     iptables -t mangle -L PIA_MANGLE -n >/dev/null 2>&1 && \
+     iptables -t mangle -L PIA_MANGLE -n 2>/dev/null | grep -q 'match-set pia_bypass'; then
     # Verify ipset contains exactly the current bypass IPs
     local var_ipset_ips var_current_ips
     var_ipset_ips=$(ipset list pia_bypass | grep -E '^[0-9]' | sort)
@@ -393,10 +407,14 @@ set_bypass() {
     ipset add pia_bypass "${ip}"
   done
 
-  # Remove old mangle rule if exists
-  iptables -t mangle -D PREROUTING -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b 2>/dev/null || true
-  # Mark packets destined to bypass IPs with fwmark 0xf0b (will use main table, bypassing VPN)
-  iptables -t mangle -A PREROUTING -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b
+  # Create custom chain and hook it
+  iptables -t mangle -N PIA_MANGLE 2>/dev/null || true
+  iptables -t mangle -F PIA_MANGLE
+  iptables -t mangle -D PREROUTING -i wg0 -j PIA_MANGLE 2>/dev/null || true
+  iptables -t mangle -I PREROUTING -i wg0 -j PIA_MANGLE
+
+  # Add mark rule inside custom chain
+  iptables -t mangle -A PIA_MANGLE -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b
 
   echo '[+] VPN bypass ready'
 }
@@ -473,44 +491,53 @@ set_portforward() {
   # Parse IP and port from pia_pf
   local var_pf_ip="${pia_pf%:*}" var_pf_port="${pia_pf#*:}"
 
-  if [ "${var_pf_ip}" = "0.0.0.0" ]; then
-    # Destination is router - use REDIRECT
-    if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j REDIRECT --to-ports "${var_pf_port}" 2>/dev/null && \
-       iptables -C INPUT -i wg0 -p tcp --dport "${var_pf_port}" -m state --state NEW -j ACCEPT 2>/dev/null; then
-      echo '[=] Port forward already configured'
-      return 0
+  # Check if already configured (idempotent)
+  if iptables -t nat -L PIA_NAT -n >/dev/null 2>&1 && \
+     iptables -L PIA_PORTFORWARD -n >/dev/null 2>&1; then
+    # Verify configuration matches current pia_pf
+    if [ "${var_pf_ip}" = "0.0.0.0" ]; then
+      # Check for REDIRECT
+      if iptables -t nat -L PIA_NAT -n 2>/dev/null | grep -q "redir ports ${var_pf_port}"; then
+        echo '[=] Port forward already configured'
+        return 0
+      fi
+    else
+      # Check for DNAT to current destination
+      if iptables -t nat -L PIA_NAT -n 2>/dev/null | grep -q "to:${pia_pf}"; then
+        echo '[=] Port forward already configured'
+        return 0
+      fi
     fi
-  else
-    # Destination is another device - use DNAT
-    if iptables -t nat -C PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}" 2>/dev/null; then
-      echo '[=] Port forward NAT already configured'
-      return 0
-    fi
+    echo '[~] Port forward configuration changed, reconfiguring...'
   fi
 
-  # Configuration changed or doesn't exist - clean up old rules
-  if iptables-save -t nat | grep -q 'wg0.*-j.*\(REDIRECT\|DNAT\)'; then
-    echo '[-] Removing old port forwarding rules'
-    iptables-save -t nat | awk '/wg0.*-j.*(REDIRECT|DNAT)/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
-      # shellcheck disable=SC2086
-      iptables -t nat ${var_rule} 2>/dev/null || true
-    done
-    iptables-save | awk '/(INPUT|FORWARD).*wg0.*tcp.*(dport|--dport).*ACCEPT/ && /^-A/ {sub(/^-A/, "-D"); print}' | while read -r var_rule; do
-      # shellcheck disable=SC2086
-      iptables ${var_rule} 2>/dev/null || true
-    done
-  fi
+  # Create custom chains
+  iptables -t nat -N PIA_NAT 2>/dev/null || true
+  iptables -N PIA_PORTFORWARD 2>/dev/null || true
+
+  # Flush chains (clean slate)
+  iptables -t nat -F PIA_NAT
+  iptables -F PIA_PORTFORWARD
+
+  # Hook chains into main chains (remove old hooks first)
+  iptables -t nat -D PREROUTING -i wg0 -j PIA_NAT 2>/dev/null || true
+  iptables -D INPUT -i wg0 -j PIA_PORTFORWARD 2>/dev/null || true
+  iptables -D FORWARD -i wg0 -j PIA_PORTFORWARD 2>/dev/null || true
+
+  iptables -t nat -I PREROUTING -i wg0 -j PIA_NAT
+  iptables -I INPUT -i wg0 -j PIA_PORTFORWARD
+  iptables -I FORWARD -i wg0 -j PIA_PORTFORWARD
 
   # Add rules based on mode
   if [ "${var_pf_ip}" = "0.0.0.0" ]; then
     # Router mode - REDIRECT and INPUT
-    iptables -t nat -I PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j REDIRECT --to-ports "${var_pf_port}"
-    iptables -I INPUT -i wg0 -p tcp --dport "${var_pf_port}" -m state --state NEW -j ACCEPT
+    iptables -t nat -A PIA_NAT -p tcp --dport "${portforward_port}" -j REDIRECT --to-ports "${var_pf_port}"
+    iptables -A PIA_PORTFORWARD -p tcp --dport "${var_pf_port}" -m state --state NEW -j ACCEPT
     echo "[+] Port ${portforward_port} redirected to router port ${var_pf_port}"
   else
     # Forward mode - DNAT and FORWARD
-    iptables -t nat -I PREROUTING -i wg0 -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}"
-    iptables -I FORWARD -i wg0 -m state --state NEW,RELATED,ESTABLISHED -j ACCEPT -d "${var_pf_ip}" -p tcp --dport "${var_pf_port}"
+    iptables -t nat -A PIA_NAT -p tcp --dport "${portforward_port}" -j DNAT --to-destination "${pia_pf}"
+    iptables -A PIA_PORTFORWARD -m state --state NEW,RELATED,ESTABLISHED -d "${var_pf_ip}" -p tcp --dport "${var_pf_port}" -j ACCEPT
     echo "[+] Port ${portforward_port} forwarded to ${pia_pf}"
   fi
 }
@@ -524,26 +551,26 @@ set_duckdns() {
   # Validate and split pia_duckdns (format: domain:token)
   [ -z "${pia_duckdns:-}" ] && error_exit "pia_duckdns not set"
   echo "${pia_duckdns}" | grep -q ':' || error_exit "pia_duckdns must be in format DOMAIN:TOKEN"
-  
+
   local var_domain var_token
   var_domain="${pia_duckdns%%:*}"
   var_token="${pia_duckdns#*:}"
- 
+
   [ -z "${var_domain}" ] && error_exit "DuckDNS domain is empty"
   [ -z "${var_token}" ] && error_exit "DuckDNS token is empty"
   [ -z "${portforward_port:-}" ] && error_exit "portforward_port not set (port forwarding must be enabled)"
   [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
- 
+
   # Update DuckDNS A record (IP address)
   local var_response_ip
   var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}")
   [ "${var_response_ip}" = "OK" ] || error_exit "DuckDNS IP update failed: ${var_response_ip}"
- 
+
   # Update DuckDNS TXT record (port number)
   local var_response_txt
   var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}")
   [ "${var_response_txt}" = "OK" ] || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
- 
+
   echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"
 }
 
@@ -567,7 +594,7 @@ fi
 if [ "${pia_pf:-false}" != 'false' ]; then
   get_portforward
   set_portforward
-  
+
   if [ "${pia_duckdns:-false}" != 'false' ]; then
     set_duckdns
   fi

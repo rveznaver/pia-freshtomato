@@ -164,6 +164,17 @@ The script runs through these stages sequentially:
 
 All configuration is saved to `pia_config` file for persistence across runs.
 
+### Policy Routing Architecture
+
+The script uses Linux policy-based routing to direct traffic through the VPN:
+
+1. **Custom routing table (1337)**: Contains routes through `wg0` (VPN interface)
+2. **Policy rule**: `ip rule add not fwmark 0xf0b table 1337`
+   - All packets **without** mark `0xf0b` use the VPN table
+   - Packets **with** mark `0xf0b` skip the VPN and use the main routing table
+3. **WireGuard fwmark**: WireGuard itself marks its control traffic with `0xf0b` to prevent routing loops
+4. **Bypass marking**: Split-tunnel bypass uses the same mark (`0xf0b`) to exclude specific destinations from the VPN
+
 ## Idempotency
 
 The script is fully idempotent - running it multiple times will:
@@ -200,8 +211,13 @@ pia_user='user' pia_pass='pass' pia_bypass='1.2.3.4 5.6.7.8' ./pia_wireguard.sh
 The bypass works by:
 1. Loading required kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set`
 2. Creating an `ipset` named `pia_bypass` containing the IP addresses
-3. Using iptables mangle table to mark packets destined to these IPs with fwmark `0xf0b`
-4. The fwmark causes packets to use the main routing table instead of the VPN
+3. Using iptables mangle table to mark packets **before routing decision**:
+   - Hooks `PREROUTING` chain for all non-VPN ingress (`! -i wg0`) to catch LAN-originated traffic
+   - Hooks `OUTPUT` chain to catch router-originated traffic (pings, cron jobs, etc.)
+4. Packets destined to bypass IPs get marked with fwmark `0xf0b`
+5. Policy routing rule `ip rule add not fwmark 0xf0b table 1337` ensures marked packets skip the VPN table and use the main routing table instead
+
+This approach requires no knowledge of LAN interface names (e.g., `br0`) and works for any network topology.
 
 **Note:** If ipset modules are not available, the script will skip VPN bypass and continue.
 
@@ -224,14 +240,14 @@ Uses REDIRECT (more efficient for local services) to forward to the router's SSH
 **Custom Chains:**
 
 The script uses custom iptables chains to isolate all PIA-related rules:
-- `PIA_INPUT` - Security rules for VPN input
-- `PIA_FORWARD` - Security rules for VPN forwarding
-- `PIA_POSTROUTING` - NAT masquerading
+- `PIA_INPUT` - Security rules for VPN input (blocks unsolicited inbound)
+- `PIA_FORWARD` - Security rules for VPN forwarding (allows outbound only)
+- `PIA_POSTROUTING` - NAT masquerading for VPN traffic
 - `PIA_NAT` - Port forwarding DNAT/REDIRECT rules
-- `PIA_PORTFORWARD` - Port access exceptions
-- `PIA_MANGLE` - VPN bypass packet marking
+- `PIA_PORTFORWARD` - Port access exceptions for forwarded traffic
+- `PIA_MANGLE` - VPN bypass packet marking (hooks: `PREROUTING ! -i wg0` and `OUTPUT`)
 
-This provides clean separation and makes debugging easier.
+This provides clean separation and makes debugging easier. Chains are only flushed and rebuilt when reconfiguration is needed (idempotent behaviour).
 
 ### Syslog Logging
 
@@ -245,6 +261,36 @@ View logs:
 ```bash
 grep pia_wireguard /var/log/messages
 ```
+
+### Verifying VPN Bypass
+
+To verify that split-tunnel bypass is working correctly:
+
+**Check policy routing:**
+```bash
+ip rule show | grep 'not from all fwmark 0xf0b lookup 1337'
+```
+Should show exactly one rule.
+
+**Check mangle chain hooks:**
+```bash
+iptables -t mangle -S PREROUTING | grep PIA_MANGLE
+iptables -t mangle -S OUTPUT | grep PIA_MANGLE
+```
+Should show `! -i wg0 -j PIA_MANGLE` in PREROUTING and `-j PIA_MANGLE` in OUTPUT.
+
+**Test router-originated bypass:**
+```bash
+# Clear counters
+iptables -t mangle -Z PIA_MANGLE
+
+# Ping a bypass IP (Google RCS server by default)
+ping -c1 -W2 216.239.36.127 >/dev/null 2>&1 || true
+
+# Check if marking occurred
+iptables -t mangle -vnL PIA_MANGLE
+```
+The counters should increase, confirming packets are being marked before routing.
 
 ### Expose acquired port on the internet
 

@@ -4,6 +4,7 @@ Script to set up PIA WireGuard on FreshTomato
 ## Features
 - **Idempotent**: Safe to run multiple times, only configures what's needed
 - **Robust**: Automatic retries with exponential backoff for flaky operations
+- **Secure**: RSA signature verification of PIA server list, TLS certificate pinning for API calls
 - **Modular**: Each stage is independent and can be run separately
 - **Region change detection**: Automatically clears dependent state when switching regions
 - **Port forwarding**: Forward to devices or router itself with automatic NAT configuration
@@ -18,7 +19,8 @@ Script to set up PIA WireGuard on FreshTomato
 - FreshTomato >= 2025.5 or compatible Linux distro
 - WireGuard kernel module (`wg`)
 - `curl` for API requests
-- `php` (or `php-cli`) for JSON parsing and base64 encoding
+- `php` (or `php-cli`) for JSON parsing
+- `openssl` for RSA signature verification and base64 encoding/decoding
 - `ipset` with kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set` for VPN bypass
 - Standard POSIX tools: `sed`, `grep`
 

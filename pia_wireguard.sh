@@ -7,7 +7,8 @@ set -eu  # Exit on error or undefined variable
 # - FreshTomato >= 2025.5 or some Linux distro
 # - wg kernel module for WireGuard
 # - curl for API requests
-# - php for JSON parsing and base64 encoding
+# - php for JSON parsing
+# - openssl for RSA signature verification and base64 encoding/decoding
 # - ipset with kernel modules: ip_set, ip_set_hash_ip, xt_set for VPN bypass
 # - Standard POSIX tools: sed, grep
 
@@ -109,9 +110,9 @@ get_cert() {
   var_cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
   [ -n "${var_cert}" ] || error_exit "Certificate download failed"
 
-  # Save to config (base64 encoded using PHP)
+  # Save to config (base64 encoded)
   local var_cert_encoded
-  var_cert_encoded=$(echo "${var_cert}" | php -r 'echo base64_encode(stream_get_contents(STDIN));')
+  var_cert_encoded=$(echo "${var_cert}" | openssl base64 -A)
   printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"${var_cert_encoded}\"" > pia_config
 
   echo '[+] Certificate ready'
@@ -140,6 +141,34 @@ get_region() {
     return 0
   fi
 
+  # Fetch server list with signature
+  local var_response var_json var_signature
+  var_response=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
+  var_json=$(echo "${var_response}" | head -1)
+  var_signature=$(echo "${var_response}" | tail -n 6)
+
+  # Verify signature using PIA's hardcoded RSA public key
+  # https://github.com/pia-foss/manual-connections/issues/21
+  cat > pia_tmp_pubkey <<'EOF'
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzLYHwX5Ug/oUObZ5eH5P
+rEwmfj4E/YEfSKLgFSsyRGGsVmmjiXBmSbX2s3xbj/ofuvYtkMkP/VPFHy9E/8ox
+Y+cRjPzydxz46LPY7jpEw1NHZjOyTeUero5e1nkLhiQqO/cMVYmUnuVcuFfZyZvc
+8Apx5fBrIp2oWpF/G9tpUZfUUJaaHiXDtuYP8o8VhYtyjuUu3h7rkQFoMxvuoOFH
+6nkc0VQmBsHvCfq4T9v8gyiBtQRy543leapTBMT34mxVIQ4ReGLPVit/6sNLoGLb
+gSnGe9Bk/a5V/5vlqeemWF0hgoRtUxMtU1hFbe7e8tSq1j+mu0SHMyKHiHd+OsmU
+IQIDAQAB
+-----END PUBLIC KEY-----
+EOF
+  echo "${var_signature}" | openssl base64 -d > pia_tmp_sig
+  printf "%s" "${var_json}" > pia_tmp_json
+  if ! openssl dgst -sha256 -verify pia_tmp_pubkey -signature pia_tmp_sig pia_tmp_json >/dev/null 2>&1; then
+    rm -f pia_tmp_sig pia_tmp_json pia_tmp_pubkey
+    error_exit "Server list signature verification failed"
+  fi
+  rm -f pia_tmp_sig pia_tmp_json pia_tmp_pubkey
+  echo '[*] Server list signature verified'
+
   local var_php vars_region
   # PHP code to extract region info
   var_php=$(cat <<'EOF'
@@ -156,7 +185,7 @@ get_region() {
 EOF
   )
   var_php=$(echo "${var_php}" | sed "s/REGION_ID/${pia_vpn}/g")
-  vars_region=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7' | head -1 | php -r "${var_php}")
+  vars_region=$(echo "${var_json}" | php -r "${var_php}")
   [ -n "${vars_region}" ] || error_exit "Failed to fetch region info"
   printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "${vars_region}" > pia_config
   echo '[+] Region info ready'
@@ -181,7 +210,7 @@ get_token() {
   [ -z "${region_meta_ip:-}" ] && error_exit "region_meta_ip not set"
   [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
+  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   local var_token
   var_token=$(curl --retry 5 --retry-all-errors -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_meta_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_meta_cn}/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
@@ -232,7 +261,7 @@ get_auth() {
   [ -z "${peer_pubkey:-}" ] && error_exit "peer_pubkey not set"
   [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
+  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   local var_php vars_auth
   # PHP code to parse auth response
@@ -451,7 +480,7 @@ get_portforward() {
   [ -z "${token:-}" ] && error_exit "token not set"
   [ -z "${certificate:-}" ] && error_exit "certificate not set"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
+  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   # Request port forward signature
   local var_php vars_portforward
@@ -487,7 +516,7 @@ set_portforward() {
   # Validate pia_pf format (must be IP:PORT)
   echo "${pia_pf}" | grep -q '^[0-9.]\+:[0-9]\+$' || error_exit "pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | php -r 'echo base64_decode(stream_get_contents(STDIN));' > pia_tmp_cert
+  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message

@@ -608,12 +608,12 @@ set_duckdns() {
 
   # Update DuckDNS A record (IP address)
   local var_response_ip
-  var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}")
+  var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}" 2>&1) || error_exit "DuckDNS IP update failed: ${var_response_ip}"
   [ "${var_response_ip}" = "OK" ] || error_exit "DuckDNS IP update failed: ${var_response_ip}"
 
   # Update DuckDNS TXT record (port number)
   local var_response_txt
-  var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}")
+  var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}" 2>&1) || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
   [ "${var_response_txt}" = "OK" ] || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
 
   echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"

@@ -354,11 +354,16 @@ set_routes() {
   # Clear custom routing table
   echo '[-] Flushing routing table 1337'
   ip route flush table 1337
-  # Add local network route (keeps LAN traffic on local network)
-  local var_lan_route
-  var_lan_route=$(ip route show dev br0 | cut -d' ' -f1)
-  [ -n "${var_lan_route}" ] || error_exit "No route found for br0"
-  ip route add "${var_lan_route}" dev br0 table 1337
+
+  # Add throw routes for all bridge interfaces (LAN prefixes fall through to main table)
+  local prefix rest
+  ip -o route show proto kernel | while read -r prefix rest; do
+    case ${rest} in
+      *"dev br"*) ip route replace throw "${prefix}" table 1337 && echo "[+] LAN exception added: ${prefix}";;
+      *) ;;
+    esac
+  done
+
   # Set default route through VPN
   ip route add default dev wg0 table 1337
   # Remove old policy rule if exists

@@ -363,7 +363,7 @@ set_routes() {
   ip route add default dev wg0 table 1337
   # Remove old policy rule if exists
   echo '[-] Removing old policy rule'
-  ip rule delete fwmark 0xf0b 2>/dev/null || true
+  ip rule del not fwmark 0xf0b table 1337 2>/dev/null || true
   # Add policy rule: use table 1337 for all packets NOT marked with 0xf0b
   ip rule add not fwmark 0xf0b table 1337
   echo '[+] Routes ready'
@@ -407,14 +407,25 @@ set_bypass() {
     ipset add pia_bypass "${ip}"
   done
 
-  # Create custom chain and hook it
+  # Create/clear marking chain (idempotent)
   iptables -t mangle -N PIA_MANGLE 2>/dev/null || true
   iptables -t mangle -F PIA_MANGLE
-  iptables -t mangle -D PREROUTING -i wg0 -j PIA_MANGLE 2>/dev/null || true
-  iptables -t mangle -I PREROUTING -i wg0 -j PIA_MANGLE
 
-  # Add mark rule inside custom chain
-  iptables -t mangle -A PIA_MANGLE -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b
+  # Remove any legacy/ineffective hook (marking after VPN ingress is too late)
+  iptables -t mangle -D PREROUTING -i wg0 -j PIA_MANGLE 2>/dev/null || true
+
+  # PREROUTING for all *non-wg0* ingress
+  # This covers LAN and any other non-VPN interfaces without knowing their names.
+  iptables -t mangle -D PREROUTING ! -i wg0 -j PIA_MANGLE 2>/dev/null || true
+  iptables -t mangle -I PREROUTING ! -i wg0 -j PIA_MANGLE
+
+  # OUTPUT for router-originated traffic (local processes)
+  iptables -t mangle -D OUTPUT -j PIA_MANGLE 2>/dev/null || true
+  iptables -t mangle -I OUTPUT -j PIA_MANGLE
+
+  # Mark rule: packets destined to bypass IPs get the fwmark that *skips* the VPN table
+  iptables -t mangle -C PIA_MANGLE -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b 2>/dev/null || \
+    iptables -t mangle -A PIA_MANGLE -m set --match-set pia_bypass dst -j MARK --set-mark 0xf0b
 
   echo '[+] VPN bypass ready'
 }

@@ -90,6 +90,16 @@ init_module() {
   echo '[ ] Initializing WireGuard...'
   modprobe wireguard || error_exit "Failed to load wireguard module"
   ip link show | grep -q 'wg0' || ip link add wg0 type wireguard || error_exit "Failed to create wg0 interface"
+
+  # Disable IPv6 on wg0 immediately after creation (PIA does not support IPv6)
+  # This prevents "Could not create IPv6 socket" error when bringing up the interface
+  if [ -d /proc/sys/net/ipv6/conf/wg0 ]; then
+    echo 1 > /proc/sys/net/ipv6/conf/wg0/disable_ipv6 2>/dev/null || {
+      echo "[!] WARNING: Could not disable IPv6 on wg0"
+      logger -t pia_wireguard "WARNING: Could not disable IPv6 on wg0"
+    }
+  fi
+
   echo '[+] WireGuard ready'
 }
 
@@ -326,8 +336,6 @@ set_wg() {
     var_attempt=$((var_attempt + 1))
   done
   [ "${var_attempt}" -le 5 ] || error_exit "Failed to bring up wg0 after 5 attempts"
-  # Disable IPv6 (PIA does not support it yet)
-  echo 1 > /proc/sys/net/ipv6/conf/wg0/disable_ipv6 2>/dev/null || true
   echo '[+] WireGuard ready'
 }
 

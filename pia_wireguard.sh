@@ -222,11 +222,21 @@ get_token() {
   # Write certificate file (needed by curl)
   echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
-  local var_token
-  var_token=$(curl --retry 5 --retry-all-errors -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_meta_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_meta_cn}/authv3/generateToken" | php -r 'echo json_decode(stream_get_contents(STDIN))->token ?? "";')
+  local var_php var_token
+  var_php=$(cat <<'EOF'
+    $d = json_decode(stream_get_contents(STDIN));
+    if (!$d || ($d->status ?? "") !== "OK") exit(1);
+    echo $d->token ?? "";
+EOF
+  )
+  # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
+  if ! var_token=$(curl --retry 5 --retry-all-errors -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_meta_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_meta_cn}/authv3/generateToken" | php -r "${var_php}"); then
+    printf "%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" > pia_config
+    error_exit "Token generation failed"
+  fi
   # Remove certificate file
   rm -f pia_tmp_cert
-  [ -n "${var_token}" ] || error_exit "Failed to generate token"
+  [ -n "${var_token}" ] || error_exit "Failed to parse token"
   printf "%s\n%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" "token=\"${var_token}\"" > pia_config
   echo '[+] Token ready'
 }
@@ -274,18 +284,23 @@ get_auth() {
   echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   local var_php vars_auth
-  # PHP code to parse auth response
+  # PHP code validates status before parsing
   var_php=$(cat <<'EOF'
     $d = json_decode(stream_get_contents(STDIN));
+    if (!$d || ($d->status ?? "") !== "OK") exit(1);
     echo "auth_peer_ip=\"$d->peer_ip\"\n";
     echo "auth_server_key=\"$d->server_key\"\n";
     echo "auth_server_vip=\"$d->server_vip\"\n";
 EOF
   )
-  vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_wg_cn}:${region_wg_port}/addKey" | php -r "${var_php}")
+  # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
+  if ! vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_wg_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
+    printf "%s\n" "$(grep -v '^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
+    error_exit "WireGuard authentication failed"
+  fi
   # Remove certificate file
   rm -f pia_tmp_cert
-  [ -n "${vars_auth}" ] || error_exit "Failed to authenticate"
+  [ -n "${vars_auth}" ] || error_exit "Failed to parse auth response"
   printf "%s\n%s\n" "$(grep -v '^auth_' pia_config 2>/dev/null || true)" "${vars_auth}" > pia_config
   echo '[+] Auth ready'
 }
@@ -494,15 +509,20 @@ get_portforward() {
   local var_php vars_portforward
   var_php=$(cat <<'EOF'
     $d = json_decode(stream_get_contents(STDIN));
+    if (!$d || ($d->status ?? "") !== "OK") exit(1);
     echo "portforward_signature=\"$d->signature\"\n";
     echo "portforward_payload=\"$d->payload\"\n";
     echo "portforward_port=\"" . json_decode(base64_decode($d->payload))->port . "\"\n";
 EOF
   )
-  vars_portforward=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_wg_cn}:19999/getSignature" --interface wg0 | php -r "${var_php}")
+  # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
+  if ! vars_portforward=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_wg_cn}:19999/getSignature" --interface wg0 | php -r "${var_php}"); then
+    printf "%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" > pia_config
+    error_exit "Port forward signature failed"
+  fi
   # Remove certificate file
   rm -f pia_tmp_cert
-  [ -n "${vars_portforward}" ] || error_exit "Failed to get port forward"
+  [ -n "${vars_portforward}" ] || error_exit "Failed to parse port forward response"
   # Save to config
   printf "%s\n%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" "${vars_portforward}" > pia_config
   echo '[+] Port forward ready'

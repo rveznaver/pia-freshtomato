@@ -25,6 +25,79 @@ error_exit() {
   exit 1
 }
 
+healthcheck_tunnel() {
+  echo '[ ] Checking tunnel health...'
+
+  local var_timeout var_now var_handshake_epoch var_handshake_age
+  local var_tx_before var_tx_after
+
+  var_timeout="${pia_handshake_timeout:-300}" # 5 minutes
+  echo "${var_timeout}" | grep -q '^[0-9][0-9]*$' || error_exit "pia_handshake_timeout must be integer seconds"
+
+  [ -d /sys/class/net/wg0 ] || {
+    echo '[*] wg0 not ready yet'
+    return 1
+  }
+
+  var_handshake_epoch=$(wg show wg0 latest-handshakes 2>/dev/null | awk 'NR==1 {print $2}')
+  [ -n "${var_handshake_epoch:-}" ] || {
+    echo '[*] No handshake data yet'
+    return 1
+  }
+
+  echo "${var_handshake_epoch}" | grep -q '^[0-9][0-9]*$' || {
+    echo '[*] Invalid handshake timestamp'
+    return 1
+  }
+  [ "${var_handshake_epoch}" -gt 0 ] || {
+    echo '[*] No handshake yet'
+    return 1
+  }
+
+  var_now=$(date +%s)
+  var_handshake_age=$((var_now - var_handshake_epoch))
+  [ "${var_handshake_age}" -lt "${var_timeout}" ] || {
+    echo "[*] Handshake too old (${var_handshake_age}s)"
+    return 1
+  }
+
+  var_tx_before=$(wg show wg0 transfer 2>/dev/null | awk 'NR==1 {print $3}')
+  [ -n "${var_tx_before:-}" ] || {
+    echo '[*] No transfer data yet'
+    return 1
+  }
+  echo "${var_tx_before}" | grep -q '^[0-9][0-9]*$' || {
+    echo '[*] Invalid TX counter before probe'
+    return 1
+  }
+
+  # PIA metadata service listens on 10.0.0.1 inside the tunnel.
+  # A successful ping confirms reply traffic was received.
+  ping -I wg0 -c 1 -W 1 10.0.0.1 >/dev/null 2>&1 || {
+    echo '[*] Metadata ping failed'
+    return 1
+  }
+
+  var_tx_after=$(wg show wg0 transfer 2>/dev/null | awk 'NR==1 {print $3}')
+  [ -n "${var_tx_after:-}" ] || {
+    echo '[*] No transfer data after probe'
+    return 1
+  }
+  echo "${var_tx_after}" | grep -q '^[0-9][0-9]*$' || {
+    echo '[*] Invalid TX counter after probe'
+    return 1
+  }
+
+  # FreshTomato bug: WG RX is always 0, so use TX delta plus ping reply.
+  [ "${var_tx_after}" -gt "${var_tx_before}" ] || {
+    echo "[*] TX did not increase after probe (before=${var_tx_before} after=${var_tx_after})"
+    return 1
+  }
+
+  echo "[=] Tunnel healthy (handshake age: ${var_handshake_age}s)"
+  return 0
+}
+
 init_script() {
   echo '[ ] Initializing script...'
   # Load config
@@ -652,6 +725,13 @@ logger -t pia_wireguard "PIA WireGuard script started"
 init_script
 init_module
 get_cert
+
+# If tunnel is unhealthy, drop region/session cache and rebuild from pia_vpn.
+# shellcheck disable=SC2310
+if ! healthcheck_tunnel; then
+  printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^peer_' pia_config 2>/dev/null || true)" > pia_config
+fi
+
 get_region
 get_token
 gen_peer
@@ -659,6 +739,9 @@ get_auth
 set_wg
 set_firewall
 set_routes
+
+# shellcheck disable=SC2310
+healthcheck_tunnel || error_exit "Tunnel healthcheck failed"
 
 if [ "${pia_bypass:-false}" != 'false' ]; then
   set_bypass

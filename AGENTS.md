@@ -10,6 +10,8 @@ Guide for AI agents working on the `pia-freshtomato` project.
 
 **Files**: `pia_wireguard.sh` (main), `pia_config` (runtime state), `README.md` (docs)
 
+The script is assumed to start once with parameters after router startup, and then called every 15 mins via a cron job
+
 ---
 
 ## Design Principles

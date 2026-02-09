@@ -26,71 +26,53 @@ error_exit() {
 }
 
 healthcheck_tunnel() {
+  # Load config
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+
+  # Skip on first run (no session state to check)
+  [ -n "${auth_peer_ip:-}" ] || {
+    echo '[=] No session state, skipping healthcheck'
+    return 0
+  }
+
   echo '[ ] Checking tunnel health...'
-
-  local var_timeout var_now var_handshake_epoch var_handshake_age
-  local var_tx_before var_tx_after
-
-  var_timeout="${pia_handshake_timeout:-300}" # 5 minutes
-  echo "${var_timeout}" | grep -q '^[0-9][0-9]*$' || error_exit "pia_handshake_timeout must be integer seconds"
 
   [ -d /sys/class/net/wg0 ] || {
     echo '[*] wg0 not ready yet'
+    logger -t pia_wireguard "[*] wg0 not ready yet"
     return 1
   }
 
-  var_handshake_epoch=$(wg show wg0 latest-handshakes 2>/dev/null | awk 'NR==1 {print $2}')
-  [ -n "${var_handshake_epoch:-}" ] || {
-    echo '[*] No handshake data yet'
-    return 1
-  }
+  # TX check (matches official client transfer monitoring)
+  local var_tx_before var_tx_after
+  var_tx_before=$(wg show wg0 transfer 2>/dev/null | awk 'NR==1 {print $3+0}')
 
-  echo "${var_handshake_epoch}" | grep -q '^[0-9][0-9]*$' || {
-    echo '[*] Invalid handshake timestamp'
-    return 1
-  }
-  [ "${var_handshake_epoch}" -gt 0 ] || {
-    echo '[*] No handshake yet'
-    return 1
-  }
-
-  var_now=$(date +%s)
-  var_handshake_age=$((var_now - var_handshake_epoch))
-  [ "${var_handshake_age}" -lt "${var_timeout}" ] || {
-    echo "[*] Handshake too old (${var_handshake_age}s)"
-    return 1
-  }
-
-  var_tx_before=$(wg show wg0 transfer 2>/dev/null | awk 'NR==1 {print $3}')
-  [ -n "${var_tx_before:-}" ] || {
-    echo '[*] No transfer data yet'
-    return 1
-  }
-  echo "${var_tx_before}" | grep -q '^[0-9][0-9]*$' || {
-    echo '[*] Invalid TX counter before probe'
-    return 1
-  }
-
-  # PIA metadata service listens on 10.0.0.1 inside the tunnel.
-  # A successful ping confirms reply traffic was received.
+  # RX substitute: FreshTomato WG RX counter is always 0, so ping confirms
+  # the return path is working. Also generates traffic on a fresh tunnel.
   ping -I wg0 -c 1 -W 1 10.0.0.1 >/dev/null 2>&1 || {
-    echo '[*] Metadata ping failed'
+    echo '[*] Metadata ping failed (no return path)'
+    logger -t pia_wireguard '[*] Metadata ping failed (no return path)'
     return 1
   }
 
-  var_tx_after=$(wg show wg0 transfer 2>/dev/null | awk 'NR==1 {print $3}')
-  [ -n "${var_tx_after:-}" ] || {
-    echo '[*] No transfer data after probe'
-    return 1
-  }
-  echo "${var_tx_after}" | grep -q '^[0-9][0-9]*$' || {
-    echo '[*] Invalid TX counter after probe'
-    return 1
-  }
-
-  # FreshTomato bug: WG RX is always 0, so use TX delta plus ping reply.
+  var_tx_after=$(wg show wg0 transfer 2>/dev/null | awk 'NR==1 {print $3+0}')
   [ "${var_tx_after}" -gt "${var_tx_before}" ] || {
     echo "[*] TX did not increase after probe (before=${var_tx_before} after=${var_tx_after})"
+    logger -t pia_wireguard "[*] TX did not increase (before=${var_tx_before} after=${var_tx_after})"
+    return 1
+  }
+
+  local var_timeout=300 # 5 minutes
+  local var_handshake_epoch var_now var_handshake_age
+  var_handshake_epoch=$(wg show wg0 latest-handshakes 2>/dev/null | awk 'NR==1 {print $2+0}')
+  var_now=$(date +%s)
+  var_handshake_age=$((var_now - var_handshake_epoch))
+  # Empty/invalid/zero epoch coerces to 0 via awk +0, producing an age
+  # equal to var_now (~decades), which always exceeds the timeout.
+  [ "${var_handshake_age}" -lt "${var_timeout}" ] || {
+    echo "[*] Handshake too old (${var_handshake_age}s)"
+    logger -t pia_wireguard "[*] Handshake too old (${var_handshake_age}s)"
     return 1
   }
 
@@ -726,9 +708,9 @@ init_script
 init_module
 get_cert
 
-# If tunnel is unhealthy, drop region/session cache and rebuild from pia_vpn.
 # shellcheck disable=SC2310
 if ! healthcheck_tunnel; then
+  logger -t pia_wireguard "WARNING: Tunnel unhealthy, rebuilding VPN"
   printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^peer_' pia_config 2>/dev/null || true)" > pia_config
 fi
 

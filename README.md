@@ -223,6 +223,48 @@ This approach requires no knowledge of LAN interface names (e.g., `br0`) and wor
 
 **Note:** If ipset modules are not available, the script will skip VPN bypass and continue.
 
+### Domain-Based VPN Bypass (dnsmasq)
+
+In addition to static IPs, you can bypass the VPN for entire domains using FreshTomato's built-in dnsmasq. When a client resolves a matching domain, dnsmasq automatically adds the resolved IP(s) to the `pia_bypass` ipset. This covers all subdomains and keeps the set up to date as DNS responses change.
+
+**Step 1 — Init script (Administration > Scripts > Init):**
+
+The ipset must be created before dnsmasq starts, otherwise dnsmasq silently ignores the `ipset=` directives.
+
+```bash
+# Load ipset modules and create the set early so dnsmasq can use it
+modprobe -a ip_set ip_set_hash_ip xt_set 2>/dev/null
+ipset create pia_bypass hash:ip timeout 86400 -exist 2>/dev/null
+```
+
+**Step 2 — dnsmasq configuration (Advanced > DHCP/DNS > Dnsmasq Custom configuration):**
+
+```
+# VPN bypass: add resolved IPs to ipset for split tunnelling
+ipset=/netflix.com/spotify.com/pia_bypass
+```
+
+**Step 3 — Restart dnsmasq** (or save settings in the web UI, which does it automatically):
+
+```bash
+service dnsmasq restart
+```
+
+**Verify it works (run on the router via SSH):**
+
+```bash
+nslookup netflix.com 127.0.0.1
+ipset list pia_bypass | tail -10
+```
+
+Resolved IPs should appear in the set with a countdown timeout.
+
+**Notes:**
+- dnsmasq adds IPs on resolution but never removes them — entries auto-expire after 24 hours (configurable via the `timeout` value in the Init script)
+- Static bypass IPs set by the script are permanent (`timeout 0`) and never expire
+- The iptables rules are unchanged — they match on the `pia_bypass` ipset regardless of how entries were added
+- Devices using DNS-over-HTTPS or hardcoded DNS servers bypass dnsmasq entirely, so their resolved IPs won't be added to the set
+
 ### Port Forwarding
 
 The script supports forwarding PIA's assigned port to:

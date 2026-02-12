@@ -494,29 +494,28 @@ set_bypass() {
     return 0
   fi
 
-  # Check if already configured with current IPs (idempotent)
+  # Check if already configured (idempotent — subset check preserves externally added entries)
   if ipset list pia_bypass >/dev/null 2>&1 && \
      iptables -t mangle -L PIA_MANGLE -n >/dev/null 2>&1 && \
      iptables -t mangle -L PIA_MANGLE -n 2>/dev/null | grep -q 'match-set pia_bypass'; then
-    # Verify ipset contains exactly the current bypass IPs
-    local var_ipset_ips var_current_ips
-    var_ipset_ips=$(ipset list pia_bypass | grep -E '^[0-9]' | sort)
-    var_current_ips=$(for ip in ${pia_bypass}; do echo "${ip}"; done | sort)
-    if [ "${var_ipset_ips}" = "${var_current_ips}" ]; then
+    local var_all_present=1
+    for ip in ${pia_bypass}; do
+      ipset test pia_bypass "${ip}" 2>/dev/null || { var_all_present=0; break; }
+    done
+    if [ "${var_all_present}" -eq 1 ]; then
       echo '[=] VPN bypass already configured'
       return 0
     fi
-    echo '[~] Bypass IPs changed, reconfiguring...'
-    logger -t pia_wireguard "Bypass IPs changed"
+    echo '[!] Bypass IPs missing from ipset, reconfiguring...'
+    logger -t pia_wireguard "Bypass IPs missing from ipset, reconfiguring..."
   fi
 
-  # Create or flush ipset
-  ipset create pia_bypass hash:ip -exist 2>/dev/null
-  ipset flush pia_bypass
+  # Create ipset with 24h auto-expiry (no flush — preserves externally added entries)
+  ipset create pia_bypass hash:ip timeout 86400 -exist 2>/dev/null
 
-  # Add bypass IPs to ipset
+  # Ensure all static bypass IPs are in the set (timeout 0 = permanent)
   for ip in ${pia_bypass}; do
-    ipset add pia_bypass "${ip}"
+    ipset add pia_bypass "${ip}" timeout 0 -exist
   done
 
   # Create/clear marking chain (idempotent)

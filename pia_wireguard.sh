@@ -451,6 +451,26 @@ set_firewall() {
   echo '[+] Firewall ready'
 }
 
+set_ipv6() {
+  echo '[ ] Configuring IPv6 leak prevention...'
+
+  # Check if already configured (idempotent)
+  if ip6tables -L PIA_FORWARD_V6 -n >/dev/null 2>&1; then
+    echo '[=] IPv6 leak prevention already configured'
+    return 0
+  fi
+
+  # Drop all routed IPv6 traffic to prevent leaks bypassing the VPN
+  # LAN-to-LAN IPv6 is unaffected (handled by bridge at layer 2, never enters FORWARD)
+  ip6tables -N PIA_FORWARD_V6 2>/dev/null || true
+  ip6tables -F PIA_FORWARD_V6
+  ip6tables -A PIA_FORWARD_V6 -j DROP
+  ip6tables -D FORWARD -j PIA_FORWARD_V6 2>/dev/null || true
+  ip6tables -I FORWARD -j PIA_FORWARD_V6
+
+  echo '[+] IPv6 leak prevention ready'
+}
+
 set_routes() {
   echo '[ ] Configuring routes...'
   # Skip if routes already configured (idempotent)
@@ -719,6 +739,7 @@ gen_peer
 get_auth
 set_wg
 set_firewall
+set_ipv6
 set_routes
 
 # shellcheck disable=SC2310

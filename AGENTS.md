@@ -83,7 +83,10 @@ Always validate: `echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,
 ### State (`pia_config`)
 Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`)
 
-**Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^portforward_'`
+**Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover).
+
+### WAN and PIA API
+All PIA API traffic that must work when the tunnel is broken (get_cert, get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
 
 ### Routing
 - Table 1337: default via `wg0`, LAN throw routes

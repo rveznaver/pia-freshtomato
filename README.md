@@ -7,6 +7,8 @@ Script to set up PIA WireGuard on FreshTomato
 - **Secure**: RSA signature verification of PIA server list, TLS certificate pinning for API calls
 - **Modular**: Each stage is independent and can be run separately
 - **Region change detection**: Automatically clears dependent state when switching regions
+- **Server failover**: Parses all meta/WG servers in a region; selects first reachable; on auth or tunnel failure clears region so the next run refetches and tries another server
+- **WAN recovery**: PIA API traffic (serverlist, token, auth) uses DoH and the default-route interface so the script can recover when the tunnel is up but broken (within one cron interval)
 - **Port forwarding**: Forward to devices or router itself with automatic NAT configuration
 - **Split tunneling**: Optional VPN bypass for specific IPs (enabled by default for Google RCS)
 - **Dynamic DNS**: Optional DuckDNS updates with VPN IP and forwarded port
@@ -160,9 +162,11 @@ The script runs through these stages sequentially:
 9. **set_firewall**: Configures iptables rules for VPN traffic
 10. **set_routes**: Sets up policy-based routing
 11. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
-12. **get_portforward** (optional): Requests port forwarding from PIA
+12. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
 13. **set_portforward** (optional): Configures NAT rules for port forwarding
 14. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
+
+If you set `pia_pf` but the selected region does not support port forwarding, the script skips the PF and DuckDNS steps and logs that the region does not support port forwarding.
 
 All configuration is saved to `pia_config` file for persistence across runs.
 

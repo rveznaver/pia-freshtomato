@@ -170,9 +170,14 @@ get_cert() {
     return 0
   fi
 
+  # WAN interface for PIA API (recovery when tunnel is broken)
+  local var_wan
+  var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
+  [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
+
   # Download certificate
   local var_cert
-  var_cert=$(curl --retry 5 --retry-all-errors -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
+  var_cert=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
   [ -n "${var_cert}" ] || error_exit "Certificate download failed"
 
   # Save to config (base64 encoded)
@@ -200,15 +205,29 @@ get_region() {
     [ -f pia_config ] && . ./pia_config
   fi
 
-  # Skip if region info already exists for current region (idempotent)
-  if [ -n "${region_meta_cn:-}" ] && [ -n "${region_wg_cn:-}" ] && [ "${region_id:-}" = "${pia_vpn}" ]; then
-    echo '[=] Region info already exists'
-    return 0
+  # WAN interface for PIA API (recovery when tunnel is broken)
+  local var_wan
+  var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
+  [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
+
+  # Optional connectivity test for cached server; skip refetch if both meta and WG reachable
+  if [ -n "${region_cn:-}" ] && [ -n "${region_meta_ip:-}" ] && [ -n "${region_wg_ip:-}" ] && \
+     [ "${region_id:-}" = "${pia_vpn}" ]; then
+    [ -z "${certificate:-}" ] || { echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert 2>/dev/null; }
+    if [ -s pia_tmp_cert ]; then
+      if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/" 2>/dev/null && \
+         curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert "https://${region_cn}:1337/" 2>/dev/null; then
+        echo '[=] Region info already exists (cached server reachable)'
+        return 0
+      fi
+    fi
+    echo '[~] Connectivity failed for cached server, refetching serverlist'
+    logger -t pia_wireguard "Connectivity failed for cached server, refetching serverlist"
   fi
 
   # Fetch server list with signature
   local var_response var_json var_signature
-  var_response=$(curl --retry 5 --retry-all-errors -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
+  var_response=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
   var_json=$(echo "${var_response}" | head -1)
   var_signature=$(echo "${var_response}" | tail -n 6)
 
@@ -234,26 +253,64 @@ EOF
   rm -f pia_tmp_sig pia_tmp_json pia_tmp_pubkey
   echo '[*] Server list signature verified'
 
+  # PHP: validate region (offline, port_forward), output region_id and meta/wg lists
   local var_php vars_region
-  # PHP code to extract region info
   var_php=$(cat <<'EOF'
     $r = current(array_filter(json_decode(stream_get_contents(STDIN))->regions, fn($x) => $x->id == "REGION_ID"));
     if (!$r) die("ERROR: Region 'REGION_ID' not found\n");
-    $mt = $r->servers->meta[0];
-    $wg = $r->servers->wg[0];
+    if (!empty($r->offline)) die("ERROR: Region REGION_ID is offline\n");
     echo "region_id=\"REGION_ID\"\n";
-    echo "region_meta_cn=\"$mt->cn\"\n";
-    echo "region_meta_ip=\"$mt->ip\"\n";
-    echo "region_wg_cn=\"$wg->cn\"\n";
-    echo "region_wg_ip=\"$wg->ip\"\n";
+    echo "region_pf=\"" . (empty($r->port_forward) ? "false" : "true") . "\"\n";
     echo "region_wg_port=\"1337\"\n";
+    $wg_ip = array_column(json_decode(json_encode($r->servers->wg), true), "ip", "cn");
+    $pairs = array_filter(array_map(fn($m) => isset($wg_ip[$m->cn]) ? "{$m->cn}#{$m->ip}#{$wg_ip[$m->cn]}" : null, $r->servers->meta));
+    echo "region_list=\"" . implode(",", $pairs) . "\"\n";
 EOF
   )
   var_php=$(echo "${var_php}" | sed "s/REGION_ID/${pia_vpn}/g")
-  vars_region=$(echo "${var_json}" | php -r "${var_php}")
-  [ -n "${vars_region}" ] || error_exit "Failed to fetch region info"
-  printf "%s\n%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "${vars_region}" > pia_config
-  echo '[+] Region info ready'
+  vars_region=$(echo "${var_json}" | php -r "${var_php}" 2>/dev/null)
+  echo "${vars_region}" | grep -q '^ERROR:' && error_exit "$(echo "${vars_region}" | head -1)"
+  [ -n "${vars_region}" ] || error_exit "Failed to parse region or region validation failed"
+
+  # Parse region_list (comma-separated items, each item is cn#meta_ip#wg_ip, matched by cn)
+  local var_region_list
+  var_region_list=$(echo "${vars_region}" | grep '^region_list=' | cut -d= -f2- | tr -d '"' | sed 's/,/\n/g')
+  [ -n "${var_region_list}" ] || error_exit "No meta or WG servers in region"
+
+  # Certificate for connectivity probe
+  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert 2>/dev/null
+  [ -s pia_tmp_cert ] || error_exit "Certificate not available for connectivity test"
+
+  # First reachable (cn, meta_ip, wg_ip) pair wins
+  local var_line var_cn var_meta_ip var_wg_ip var_region_pf var_found
+  var_found='false'
+
+  # Disable port forwarding if region does not support it
+  var_region_pf=$(echo "${vars_region}" | grep '^region_pf=' | head -1 | cut -d= -f2- | tr -d '"')
+  [ -z "${var_region_pf:-}" ] && var_region_pf='false'
+  if [ "${var_region_pf}" != 'true' ] && [ "${pia_pf:-false}" != 'false' ]; then
+    printf "%s\n%s\n" "$(grep -v '^pia_pf=' pia_config 2>/dev/null || true)" "pia_pf=\"false\"" > pia_config
+    pia_pf='false'
+    echo "[!] Region does not support port forwarding, disabled"
+    logger -t pia_wireguard "Region does not support port forwarding, disabled"
+  fi
+
+  while [ -n "${var_region_list}" ]; do
+    var_line=$(echo "${var_region_list}" | sed -n '1p')
+    var_cn=$(echo "${var_line}" | cut -d# -f1)
+    var_meta_ip=$(echo "${var_line}" | cut -d# -f2)
+    var_wg_ip=$(echo "${var_line}" | cut -d# -f3)
+    if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_meta_ip}:" --cacert pia_tmp_cert "https://${var_cn}/" 2>/dev/null && \
+       curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_wg_ip}:" --cacert pia_tmp_cert "https://${var_cn}:1337/" 2>/dev/null; then
+      printf "%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "region_id=\"${pia_vpn}\"" "region_cn=\"${var_cn}\"" "region_meta_ip=\"${var_meta_ip}\"" "region_wg_ip=\"${var_wg_ip}\"" "region_wg_port=\"1337\"" > pia_config
+      echo "[+] Region info ready (selected ${var_cn})"
+      logger -t pia_wireguard "Selected ${var_cn}"
+      var_found='true'
+      break
+    fi
+    var_region_list=$(echo "${var_region_list}" | sed '1d')
+  done
+  [ "${var_found}" = 'true' ] || error_exit "No reachable server in region ${pia_vpn}"
 }
 
 get_token() {
@@ -271,9 +328,13 @@ get_token() {
   # Validate required variables
   [ -z "${pia_user:-}" ] && error_exit "pia_user not set"
   [ -z "${pia_pass:-}" ] && error_exit "pia_pass not set"
-  [ -z "${region_meta_cn:-}" ] && error_exit "region_meta_cn not set"
+  [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${region_meta_ip:-}" ] && error_exit "region_meta_ip not set"
   [ -z "${certificate:-}" ] && error_exit "certificate not set"
+  # WAN interface for PIA API (recovery when tunnel is broken)
+  local var_wan
+  var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
+  [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
   # Write certificate file (needed by curl)
   echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
@@ -285,7 +346,7 @@ get_token() {
 EOF
   )
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! var_token=$(curl --retry 5 --retry-all-errors -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_meta_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_meta_cn}/authv3/generateToken" | php -r "${var_php}"); then
+  if ! var_token=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/authv3/generateToken" | php -r "${var_php}"); then
     printf "%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" > pia_config
     error_exit "Token generation failed"
   fi
@@ -329,12 +390,16 @@ get_auth() {
     return 0
   fi
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] && error_exit "region_wg_cn not set"
+  [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
   [ -z "${region_wg_port:-}" ] && error_exit "region_wg_port not set"
   [ -z "${token:-}" ] && error_exit "token not set"
   [ -z "${peer_pubkey:-}" ] && error_exit "peer_pubkey not set"
   [ -z "${certificate:-}" ] && error_exit "certificate not set"
+  # WAN interface for PIA API (recovery when tunnel is broken)
+  local var_wan
+  var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
+  [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
   # Write certificate file (needed by curl)
   echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
@@ -349,8 +414,9 @@ get_auth() {
 EOF
   )
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! vars_auth=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_wg_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
-    printf "%s\n" "$(grep -v '^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
+  if ! vars_auth=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 10 -GSs --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
+    printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
+    logger -t pia_wireguard "WireGuard authentication failed, cleared region/token/auth for failover"
     error_exit "WireGuard authentication failed"
   fi
   # Remove certificate file
@@ -405,7 +471,11 @@ set_wg() {
     ip link set wg0 up && break
     var_attempt=$((var_attempt + 1))
   done
-  [ "${var_attempt}" -le 5 ] || error_exit "Failed to bring up wg0 after 5 attempts"
+  if [ "${var_attempt}" -gt 5 ]; then
+    printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
+    logger -t pia_wireguard "Failed to bring up wg0 after 5 attempts, cleared region/token/auth for failover"
+    error_exit "Failed to bring up wg0 after 5 attempts"
+  fi
   echo '[+] WireGuard ready'
 }
 
@@ -572,7 +642,7 @@ get_portforward() {
     return 0
   fi
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] && error_exit "region_wg_cn not set"
+  [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${auth_server_vip:-}" ] && error_exit "auth_server_vip not set"
   [ -z "${token:-}" ] && error_exit "token not set"
   [ -z "${certificate:-}" ] && error_exit "certificate not set"
@@ -590,7 +660,7 @@ get_portforward() {
 EOF
   )
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! vars_portforward=$(curl --retry 10 --retry-all-errors -GSs --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_wg_cn}:19999/getSignature" --interface wg0 | php -r "${var_php}"); then
+  if ! vars_portforward=$(curl --retry 10 -GSs --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_cn}:19999/getSignature" --interface wg0 | php -r "${var_php}"); then
     printf "%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" > pia_config
     error_exit "Port forward signature failed"
   fi
@@ -608,7 +678,7 @@ set_portforward() {
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
   # Validate required variables
-  [ -z "${region_wg_cn:-}" ] && error_exit "region_wg_cn not set"
+  [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${auth_server_vip:-}" ] && error_exit "auth_server_vip not set"
   [ -z "${portforward_signature:-}" ] && error_exit "portforward_signature not set"
   [ -z "${portforward_payload:-}" ] && error_exit "portforward_payload not set"
@@ -622,7 +692,7 @@ set_portforward() {
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message
-  var_bind_response=$(curl -sGm 5 --connect-to "${region_wg_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_wg_cn}:19999/bindPort" --interface wg0)
+  var_bind_response=$(curl -sGm 5 --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_cn}:19999/bindPort" --interface wg0)
   # Remove certificate file
   rm -f pia_tmp_cert
   # Parse response

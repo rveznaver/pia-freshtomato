@@ -223,7 +223,11 @@ All configuration is saved to `pia_config` file for persistence across runs.
 
 The script uses Linux policy-based routing to direct traffic through the VPN:
 
-1. **Custom routing table (1337)**: Contains routes through `wg0` (VPN interface) plus throw routes for bridge interfaces so LAN traffic falls through to the main table. (An alternative using `ip rule ... table main suppress_prefixlength 1` would avoid throw routes but requires kernel 3.x+; FreshTomato uses kernel 2.6.)
+1. **Custom routing table (1337)**: Contains `default dev wg0` plus throw routes so the following stay local (fall through to main table):
+   - **Bridge interfaces**: prefixes from `ip route show proto kernel` with `dev br*` (LAN subnets).
+   - **169.254.0.0/16** (link-local): Avahi/Bonjour and zeroconf; may not appear as a bridge route on all systems.
+   - **224.0.0.0/4** (multicast): local discovery and streaming.
+   An alternative using `ip rule ... table main suppress_prefixlength 1` would avoid throw routes but requires kernel 3.x+; FreshTomato uses kernel 2.6. Do not add a blanket throw for 10.0.0.0/8 (PIA DNS is 10.0.0.0/24 and must go via the VPN).
 2. **Policy rule**: `ip rule add not fwmark 0xf0b table 1337`
    - All packets **without** mark `0xf0b` use the VPN table
    - Packets **with** mark `0xf0b` skip the VPN and use the main routing table

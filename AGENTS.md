@@ -95,7 +95,11 @@ Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*`)
 All PIA API traffic that must work when the tunnel is broken (get_cert, get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
 
 ### Routing
-- Table 1337: default via `wg0`, plus throw routes for bridge interfaces (LAN prefixes fall through to main). suppress_prefixlength 1 is not used (often unsupported by BusyBox ip).
+- Table 1337: `default dev wg0` plus throw routes so local traffic falls through to main:
+  - Bridge discovery: `ip -o route show proto kernel` with `*"dev br"*` (LAN prefixes).
+  - 169.254.0.0/16 (link-local) for Avahi/Bonjour.
+  - 224.0.0.0/4 (multicast) for local discovery/streaming.
+- suppress_prefixlength 1 is not used (requires kernel 3.x+; FreshTomato uses 2.6). Do not add a throw for 10.0.0.0/8 (PIA DNS 10.0.0.0/24 must go via VPN).
 - Policy: `ip rule add not fwmark 0xf0b table 1337` (unmarked → VPN, marked → direct).
 - Split tunnel: `ipset` + `iptables -t mangle` marks bypass IPs with `0xf0b`
 

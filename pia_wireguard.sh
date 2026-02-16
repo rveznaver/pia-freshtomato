@@ -544,9 +544,7 @@ set_ipv6() {
 set_routes() {
   echo '[ ] Configuring routes...'
   # Skip if routes already configured (idempotent)
-  if ip route show table 1337 | grep -q 'default dev wg0' && \
-     ip rule list | grep -q 'suppress_prefixlength 1' && \
-     ip rule list | grep -q 'not from all fwmark 0xf0b lookup 1337'; then
+  if ip route show table 1337 | grep -q 'default dev wg0' && ip rule list | grep -q 'not from all fwmark 0xf0b lookup 1337'; then
     echo '[=] Routes already configured'
     return 0
   fi
@@ -554,17 +552,23 @@ set_routes() {
   echo '[-] Flushing routing table 1337'
   ip route flush table 1337
 
-  # Set default route through VPN (table 1337 only needs default; LAN uses main via suppress_prefixlength)
+  # Add throw routes for all bridge interfaces (LAN prefixes fall through to main table).
+  # suppress_prefixlength 1 would avoid this but requires kernel 3.x+; FreshTomato uses 2.6.
+  local prefix rest
+  ip -o route show proto kernel | while read -r prefix rest; do
+    case ${rest} in
+      *"dev br"*) ip route replace throw "${prefix}" table 1337 && echo "[+] LAN exception added: ${prefix}";;
+      *) ;;
+    esac
+  done
+
+  # Set default route through VPN
   ip route add default dev wg0 table 1337
-
-  # Remove old policy rules if they exist (current or legacy single-rule setup)
-  echo '[-] Removing old policy rules'
-  ip rule del not fwmark 0xf0b table main suppress_prefixlength 1 2>/dev/null || true
+  # Remove old policy rule if exists
+  echo '[-] Removing old policy rule'
   ip rule del not fwmark 0xf0b table 1337 2>/dev/null || true
-
-  # Add policy rules: unmarked traffic tries main only for non-default/non-/1 routes, else table 1337 (VPN)
-  ip rule add not fwmark 0xf0b table main suppress_prefixlength 1 priority 1336
-  ip rule add not fwmark 0xf0b table 1337 priority 1337
+  # Add policy rule: use table 1337 for all packets NOT marked with 0xf0b
+  ip rule add not fwmark 0xf0b table 1337
   echo '[+] Routes ready'
 }
 

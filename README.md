@@ -223,13 +223,12 @@ All configuration is saved to `pia_config` file for persistence across runs.
 
 The script uses Linux policy-based routing to direct traffic through the VPN:
 
-1. **Custom routing table (1337)**: Contains only `default dev wg0`. No throw routes; LAN and other "local" traffic is handled by the first policy rule.
-2. **Policy rules** (priorities 1336, 1337): For packets **without** mark `0xf0b`:
-   - **1336**: `table main suppress_prefixlength 1` — use main's route only if it has prefix length > 1 (i.e. not default or /1). So any destination for which main has a specific route (LAN, static, etc.) goes via main.
-   - **1337**: `table 1337` — use default via wg0 for everything that fell through (no specific route in main).
-   - Packets **with** mark `0xf0b` skip these and use the main routing table.
-3. **WireGuard fwmark**: WireGuard itself marks its control traffic with `0xf0b` to prevent routing loops.
-4. **Bypass marking**: Split-tunnel bypass uses the same mark (`0xf0b`) to exclude specific destinations from the VPN.
+1. **Custom routing table (1337)**: Contains routes through `wg0` (VPN interface) plus throw routes for bridge interfaces so LAN traffic falls through to the main table. (An alternative using `ip rule ... table main suppress_prefixlength 1` would avoid throw routes but requires kernel 3.x+; FreshTomato uses kernel 2.6.)
+2. **Policy rule**: `ip rule add not fwmark 0xf0b table 1337`
+   - All packets **without** mark `0xf0b` use the VPN table
+   - Packets **with** mark `0xf0b` skip the VPN and use the main routing table
+3. **WireGuard fwmark**: WireGuard itself marks its control traffic with `0xf0b` to prevent routing loops
+4. **Bypass marking**: Split-tunnel bypass uses the same mark (`0xf0b`) to exclude specific destinations from the VPN
 
 ## Idempotency
 
@@ -271,7 +270,7 @@ The bypass works by:
    - Hooks `PREROUTING` chain for all non-VPN ingress (`! -i wg0`) to catch LAN-originated traffic
    - Hooks `OUTPUT` chain to catch router-originated traffic (pings, cron jobs, etc.)
 4. Packets destined to bypass IPs get marked with fwmark `0xf0b`
-5. Policy rules (unmarked → main suppress_prefixlength 1, then table 1337) ensure marked packets skip the VPN and use the main routing table instead
+5. Policy routing rule `ip rule add not fwmark 0xf0b table 1337` ensures marked packets skip the VPN table and use the main routing table instead
 
 This approach requires no knowledge of LAN interface names (e.g., `br0`) and works for any network topology.
 

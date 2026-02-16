@@ -95,8 +95,8 @@ Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*`)
 All PIA API traffic that must work when the tunnel is broken (get_cert, get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
 
 ### Routing
-- Table 1337: only `default dev wg0` (no throw routes)
-- Policy (priorities 1336, 1337): unmarked traffic first tries `table main suppress_prefixlength 1` (use main only when route has prefix length > 1), then `table 1337` for default via wg0. Marked (0xf0b) traffic uses main.
+- Table 1337: default via `wg0`, plus throw routes for bridge interfaces (LAN prefixes fall through to main). suppress_prefixlength 1 is not used (often unsupported by BusyBox ip).
+- Policy: `ip rule add not fwmark 0xf0b table 1337` (unmarked → VPN, marked → direct).
 - Split tunnel: `ipset` + `iptables -t mangle` marks bypass IPs with `0xf0b`
 
 ### iptables Chains

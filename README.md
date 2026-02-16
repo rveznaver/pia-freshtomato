@@ -1,32 +1,40 @@
 # pia-freshtomato
 Script to set up PIA WireGuard on FreshTomato
 
-## Features
-- **Idempotent**: Safe to run multiple times, only configures what's needed
-- **Robust**: Automatic retries with exponential backoff for flaky operations
-- **Secure**: RSA signature verification of PIA server list, TLS certificate pinning for API calls
-- **Modular**: Each stage is independent and can be run separately
-- **Region change detection**: Automatically clears dependent state when switching regions
-- **Server failover**: Parses all meta/WG servers in a region; selects first reachable; on auth or tunnel failure clears region so the next run refetches and tries another server
-- **WAN recovery**: PIA API traffic (serverlist, token, auth) uses DoH and the default-route interface so the script can recover when the tunnel is up but broken (within one cron interval)
-- **Port forwarding**: Forward to devices or router itself with automatic NAT configuration
-- **Split tunneling**: Optional VPN bypass for specific IPs (enabled by default for Google RCS)
-- **Dynamic DNS**: Optional DuckDNS updates with VPN IP and forwarded port
-- **Custom iptables chains**: Clean rule isolation using named chains (PIA_*)
-- **Syslog logging**: Automatic logging of errors, warnings, and important events
-- **Visual feedback**: Clear status indicators for all operations
-- **Input validation**: Validates all user inputs to prevent injection attacks
-
-## Requirements
-- FreshTomato >= 2025.5 or compatible Linux distro
-- WireGuard kernel module (`wg`)
-- `curl` for API requests
-- `php` (or `php-cli`) for JSON parsing
-- `openssl` for RSA signature verification and base64 encoding/decoding
-- `ipset` with kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set` for VPN bypass
-- Standard POSIX tools: `sed`, `grep`
-
 ## Setup
+
+### Quick Setup (FreshTomato)
+
+This sets up the VPN to start automatically after each reboot and stay healthy via cron.
+
+**1. WAN Up script (Administration > Scripts > WAN Up):**
+
+Paste the following, replacing `<USERNAME>` and `<PASSWORD>` with your PIA credentials:
+
+```bash
+cd /tmp
+curl -sO https://raw.githubusercontent.com/rveznaver/pia-freshtomato/refs/heads/main/pia_wireguard.sh
+chmod +x pia_wireguard.sh
+pia_user='<USERNAME>' pia_pass='<PASSWORD>' ./pia_wireguard.sh
+```
+
+This downloads the script to `/tmp` and runs it every time the WAN interface comes up (including after reboot). Credentials are saved to `pia_config` on first run.
+
+**2. Cron job (Administration > Scheduler):**
+
+Enable a custom cron entry (e.g. Custom 1) to run every 15 minutes:
+
+```
+*/15 * * * * cd /tmp && ./pia_wireguard.sh
+```
+
+The cron run does not need credentials — they are already saved in `pia_config` from the WAN Up run. The script is idempotent: it skips stages that are already configured and only rebuilds if the healthcheck detects a problem.
+
+**3. Save and reboot.**
+
+The VPN will come up automatically after the router boots and WAN connects. Every 15 minutes, cron re-runs the script to maintain the tunnel, rebind port forwarding, and recover from any failures.
+
+**Note:** `/tmp` is in RAM on FreshTomato and cleared on reboot. The WAN Up script re-downloads the script each boot. If you prefer persistence, use JFFS (`/jffs`) instead of `/tmp`.
 
 ### Basic Usage (No Port Forwarding)
 ```bash
@@ -67,6 +75,33 @@ pia_duckdns='mydomain:duckdns-token' \
 pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.sh
 ```
 
+## Features
+- **Idempotent**: Safe to run multiple times, only configures what's needed
+- **Robust**: Automatic retries with exponential backoff for flaky operations
+- **Secure**: RSA signature verification of PIA server list, TLS certificate pinning for API calls
+- **Modular**: Each stage is independent and can be run separately
+- **Tunnel healthcheck**: Verifies handshake age, TX transfer, and return-path liveness on every run; unhealthy tunnel triggers automatic rebuild
+- **Region change detection**: Automatically clears dependent state when switching regions
+- **Server failover**: Parses all meta/WG servers in a region; selects first reachable; on auth or tunnel failure clears region so the next run refetches and tries another server
+- **WAN recovery**: PIA API traffic (serverlist, token, auth) uses DoH and the default-route interface so the script can recover when the tunnel is up but broken (within one cron interval)
+- **IPv6 leak prevention**: Drops all routed IPv6 traffic via ip6tables to prevent leaks bypassing the VPN; LAN-to-LAN IPv6 is unaffected
+- **Port forwarding**: Forward to devices or router itself with automatic NAT configuration
+- **Split tunnelling**: Optional VPN bypass for specific IPs (enabled by default for Google RCS)
+- **Dynamic DNS**: Optional DuckDNS updates with VPN IP and forwarded port
+- **Custom iptables chains**: Clean rule isolation using named chains (PIA_*)
+- **Syslog logging**: Automatic logging of errors, warnings, and important events
+- **Visual feedback**: Clear status indicators for all operations
+- **Input validation**: Validates all user inputs to prevent injection attacks
+
+## Requirements
+- FreshTomato >= 2025.5 or compatible Linux distro
+- WireGuard kernel module (`wg`)
+- `curl` for API requests
+- `php` (or `php-cli`) for JSON parsing
+- `openssl` for RSA signature verification and base64 encoding/decoding
+- `ipset` with kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set` for VPN bypass
+- Standard POSIX tools: `sed`, `grep`
+
 ## Configuration Variables
 
 | Variable | Required | Default | Description |
@@ -92,8 +127,10 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [+] WireGuard ready
 [ ] Downloading PIA certificate...
 [+] Certificate ready
+[=] No session state, skipping healthcheck
 [ ] Fetching PIA region info...
-[+] Region info ready
+[*] Server list signature verified
+[+] Region info ready (selected ...)
 [ ] Generating PIA token...
 [+] Token ready
 [ ] Generating peer keys...
@@ -104,8 +141,12 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [+] WireGuard ready
 [ ] Configuring firewall...
 [+] Firewall ready
+[ ] Configuring IPv6 leak prevention...
+[+] IPv6 leak prevention ready
 [ ] Configuring routes...
 [+] Routes ready
+[ ] Checking tunnel health...
+[=] Tunnel healthy (handshake age: 2s)
 [ ] Configuring VPN bypass...
 [+] VPN bypass ready
 ```
@@ -128,13 +169,18 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [ ] Initializing WireGuard...
 [+] WireGuard ready
 [=] Certificate already exists
-[=] Region info already exists
+[ ] Checking tunnel health...
+[=] Tunnel healthy (handshake age: 45s)
+[=] Region info already exists (cached server reachable)
 [=] Token already exists
 [=] Keys already exist
 [=] Auth already exists
 [=] WireGuard already configured
 [=] Firewall already configured
+[=] IPv6 leak prevention already configured
 [=] Routes already configured
+[ ] Checking tunnel health...
+[=] Tunnel healthy (handshake age: 45s)
 [=] VPN bypass already configured
 ```
 
@@ -154,17 +200,20 @@ The script runs through these stages sequentially:
 1. **init_script**: Validates credentials, sets defaults, saves config
 2. **init_module**: Loads WireGuard kernel module, creates `wg0` interface
 3. **get_cert**: Downloads and caches PIA certificate
-4. **get_region**: Fetches region server information
-5. **get_token**: Generates authentication token
-6. **gen_peer**: Generates WireGuard key pair
-7. **get_auth**: Authenticates with PIA and gets server details
-8. **set_wg**: Configures WireGuard interface and brings it up
-9. **set_firewall**: Configures iptables rules for VPN traffic
-10. **set_routes**: Sets up policy-based routing
-11. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
-12. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
-13. **set_portforward** (optional): Configures NAT rules for port forwarding
-14. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
+4. **healthcheck_tunnel** (pre-flight): Checks tunnel health; if unhealthy, clears session state to trigger a full rebuild
+5. **get_region**: Fetches region server information, verifies signature, selects first reachable server
+6. **get_token**: Generates authentication token
+7. **gen_peer**: Generates WireGuard key pair
+8. **get_auth**: Authenticates with PIA and gets server details
+9. **set_wg**: Configures WireGuard interface and brings it up
+10. **set_firewall**: Configures iptables rules for VPN traffic
+11. **set_ipv6**: Drops routed IPv6 traffic to prevent leaks bypassing the VPN
+12. **set_routes**: Sets up policy-based routing
+13. **healthcheck_tunnel** (verification): Confirms tunnel is healthy; exits with error if not
+14. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
+15. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
+16. **set_portforward** (optional): Configures NAT rules for port forwarding
+17. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
 
 If you set `pia_pf` but the selected region does not support port forwarding, the script skips the PF and DuckDNS steps and logs that the region does not support port forwarding.
 
@@ -174,12 +223,13 @@ All configuration is saved to `pia_config` file for persistence across runs.
 
 The script uses Linux policy-based routing to direct traffic through the VPN:
 
-1. **Custom routing table (1337)**: Contains routes through `wg0` (VPN interface)
-2. **Policy rule**: `ip rule add not fwmark 0xf0b table 1337`
-   - All packets **without** mark `0xf0b` use the VPN table
-   - Packets **with** mark `0xf0b` skip the VPN and use the main routing table
-3. **WireGuard fwmark**: WireGuard itself marks its control traffic with `0xf0b` to prevent routing loops
-4. **Bypass marking**: Split-tunnel bypass uses the same mark (`0xf0b`) to exclude specific destinations from the VPN
+1. **Custom routing table (1337)**: Contains only `default dev wg0`. No throw routes; LAN and other "local" traffic is handled by the first policy rule.
+2. **Policy rules** (priorities 1336, 1337): For packets **without** mark `0xf0b`:
+   - **1336**: `table main suppress_prefixlength 1` — use main's route only if it has prefix length > 1 (i.e. not default or /1). So any destination for which main has a specific route (LAN, static, etc.) goes via main.
+   - **1337**: `table 1337` — use default via wg0 for everything that fell through (no specific route in main).
+   - Packets **with** mark `0xf0b` skip these and use the main routing table.
+3. **WireGuard fwmark**: WireGuard itself marks its control traffic with `0xf0b` to prevent routing loops.
+4. **Bypass marking**: Split-tunnel bypass uses the same mark (`0xf0b`) to exclude specific destinations from the VPN.
 
 ## Idempotency
 
@@ -221,7 +271,7 @@ The bypass works by:
    - Hooks `PREROUTING` chain for all non-VPN ingress (`! -i wg0`) to catch LAN-originated traffic
    - Hooks `OUTPUT` chain to catch router-originated traffic (pings, cron jobs, etc.)
 4. Packets destined to bypass IPs get marked with fwmark `0xf0b`
-5. Policy routing rule `ip rule add not fwmark 0xf0b table 1337` ensures marked packets skip the VPN table and use the main routing table instead
+5. Policy rules (unmarked → main suppress_prefixlength 1, then table 1337) ensure marked packets skip the VPN and use the main routing table instead
 
 This approach requires no knowledge of LAN interface names (e.g., `br0`) and works for any network topology.
 
@@ -294,6 +344,7 @@ The script uses custom iptables chains to isolate all PIA-related rules:
 - `PIA_NAT` - Port forwarding DNAT/REDIRECT rules
 - `PIA_PORTFORWARD` - Port access exceptions for forwarded traffic
 - `PIA_MANGLE` - VPN bypass packet marking (hooks: `PREROUTING ! -i wg0` and `OUTPUT`)
+- `PIA_FORWARD_V6` - IPv6 leak prevention (drops all routed IPv6)
 
 This provides clean separation and makes debugging easier. Chains are only flushed and rebuilt when reconfiguration is needed (idempotent behaviour).
 

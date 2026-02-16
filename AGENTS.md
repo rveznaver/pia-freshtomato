@@ -6,7 +6,7 @@ Guide for AI agents working on the `pia-freshtomato` project.
 
 **Purpose**: Automated PIA WireGuard VPN setup for FreshTomato routers.
 
-**Environment**: FreshTomato 2025.3+, BusyBox 1.37.0, ash shell (POSIX), PHP 8.3, curl 8.17, OpenSSL 3.0
+**Environment**: FreshTomato 2025.5+, BusyBox 1.37.0, ash shell (POSIX), PHP 8.3, curl 8.17, OpenSSL 3.0
 
 **Files**: `pia_wireguard.sh` (main), `pia_config` (runtime state), `README.md` (docs)
 
@@ -85,12 +85,18 @@ Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*`)
 
 **Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover).
 
+### Tunnel Healthcheck
+`healthcheck_tunnel()` runs twice per execution: once before provisioning (to detect a broken tunnel and trigger rebuild) and once after (to verify the tunnel is working). Checks: interface presence (`/sys/class/net/wg0`), TX transfer increase after a ping probe, handshake age < 300s, and return-path liveness (ping 10.0.0.1 via wg0). On failure before provisioning, region/token/auth/peer state is cleared for a full rebuild.
+
+### IPv6 Leak Prevention
+`set_ipv6()` drops all routed IPv6 traffic via a dedicated `PIA_FORWARD_V6` ip6tables chain to prevent leaks bypassing the VPN. LAN-to-LAN IPv6 is unaffected (handled by bridge at layer 2, never enters FORWARD).
+
 ### WAN and PIA API
 All PIA API traffic that must work when the tunnel is broken (get_cert, get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
 
 ### Routing
-- Table 1337: default via `wg0`, LAN throw routes
-- Policy: `ip rule add not fwmark 0xf0b table 1337` (unmarked → VPN, marked → direct)
+- Table 1337: only `default dev wg0` (no throw routes)
+- Policy (priorities 1336, 1337): unmarked traffic first tries `table main suppress_prefixlength 1` (use main only when route has prefix length > 1), then `table 1337` for default via wg0. Marked (0xf0b) traffic uses main.
 - Split tunnel: `ipset` + `iptables -t mangle` marks bypass IPs with `0xf0b`
 
 ### iptables Chains
@@ -117,7 +123,7 @@ Validate all user input (IPs, ports, formats) with regex to prevent injection
 
 1. **IPv6 Socket Error**: Disable IPv6 in `init_module()` immediately after creating `wg0`: `echo 1 > /proc/sys/net/ipv6/conf/wg0/disable_ipv6`
 2. **Variable Expansion**: Always use `${var:-}` not `$var` (prevents `set -u` exit)
-3. **OpenSSL Base64**: Always use `-A` flag for base64 operations to prevent line wrapping (76 char default breaks encoded data): `openssl base64 -A` for encode, `openssl base64 -A -d` for decode. **Exception**: When decoding multi-line base64 input that's already wrapped (like PIA's signature from API), omit `-A`: `echo "${var_signature}" | openssl base64 -d` (line 173)
+3. **OpenSSL Base64**: Always use `-A` flag for base64 operations to prevent line wrapping (76 char default breaks encoded data): `openssl base64 -A` for encode, `openssl base64 -A -d` for decode. **Exception**: When decoding multi-line base64 input that's already wrapped (like PIA's signature from API), omit `-A`: `echo "${var_signature}" | openssl base64 -d` (see `get_region` in `pia_wireguard.sh`)
 4. **Module Loading**: Use `modprobe -a` for multiple modules (`modprobe -a ip_set ip_set_hash_ip xt_set`), check availability with `modprobe -n` before attempting to load, handle gracefully if unavailable (optional features like split tunneling)
 
 ## Performance

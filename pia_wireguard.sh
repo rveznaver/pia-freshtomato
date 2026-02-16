@@ -562,6 +562,11 @@ set_routes() {
     esac
   done
 
+  # Link-local (169.254.0.0/16) for Avahi/Bonjour; may not appear as bridge route on all systems
+  ip route replace throw 169.254.0.0/16 table 1337 2>/dev/null && echo "[+] LAN exception added: 169.254.0.0/16 (link-local)"
+  # Multicast (224.0.0.0/4) for local discovery and streaming; keep off VPN
+  ip route replace throw 224.0.0.0/4 table 1337 2>/dev/null && echo "[+] LAN exception added: 224.0.0.0/4 (multicast)"
+
   # Set default route through VPN
   ip route add default dev wg0 table 1337
   # Remove old policy rule if exists

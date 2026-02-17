@@ -217,6 +217,7 @@ get_region() {
     if [ -s pia_tmp_cert ]; then
       if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/" 2>/dev/null && \
          curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert "https://${region_cn}:1337/" 2>/dev/null; then
+        rm -f pia_tmp_cert
         echo '[=] Region info already exists (cached server reachable)'
         return 0
       fi
@@ -303,6 +304,7 @@ EOF
     fi
     var_region_list=$(echo "${var_region_list}" | sed '1d')
   done
+  rm -f pia_tmp_cert
   [ "${var_found}" = 'true' ] || error_exit "No reachable server in region ${pia_vpn}"
 }
 

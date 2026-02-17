@@ -334,16 +334,23 @@ get_token() {
   echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   local var_php var_token
+  # Parse token from JSON; meta API has status+token, public v2 API has token only
   var_php=$(cat <<'EOF'
     $d = json_decode(stream_get_contents(STDIN));
-    if (!$d || ($d->status ?? "") !== "OK") exit(1);
+    if (!$d || (isset($d->status) && $d->status !== "OK")) exit(1);
     echo $d->token ?? "";
 EOF
   )
+  # Try region meta generateToken first
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
   if ! var_token=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/authv3/generateToken" | php -r "${var_php}"); then
-    printf "%s\n" "$(grep -v '^token=' pia_config 2>/dev/null || true)" > pia_config
-    error_exit "Token generation failed"
+    echo '[~] Meta token failed, trying public token API...'
+    # Fallback: public token endpoint
+    if ! var_token=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss -X POST -F "username=${pia_user}" -F "password=${pia_pass}" "https://www.privateinternetaccess.com/api/client/v2/token" | php -r "${var_php}"); then
+      # Both failed: clear region so next run re-selects server pair
+      printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^portforward_' pia_config 2>/dev/null || true)" > pia_config
+      error_exit "Token generation failed (meta and public API); region cleared for next run"
+    fi
   fi
   # Remove certificate file
   rm -f pia_tmp_cert

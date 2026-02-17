@@ -40,7 +40,7 @@ Use `error_exit()` with context: `[ -z "${token:-}" ] && error_exit "token not s
 ### Shell
 - `#!/usr/bin/env ash` (BusyBox POSIX shell, no bashisms)
 - `set -eu` (exit on error/undefined, NO `-o pipefail`)
-- Lint with `shellcheck shell=dash`
+- Lint with: `shellcheck -x -a -S style -o all -s dash pia_wireguard.sh`
 
 ### Variables
 **Prefixes**: `pia_*` (user config), `var_*` (local), `region_*` (cached), `token*` (session), `auth_*` (WireGuard), `peer_*` (keys), `portforward_*` (port data)
@@ -83,7 +83,7 @@ Always validate: `echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,
 ### State (`pia_config`)
 Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*` including `region_pf`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`). `region_pf` is set by `get_region()` from the server list (whether the region supports port forwarding) and is used by `get_portforward()` / `set_portforward()` to skip when the region does not support PF.
 
-**Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover). When `healthcheck_tunnel()` fails before provisioning, the same pattern clears `region_*`, `token`, `auth_*`, `peer_*`, and `portforward_*` so the next run does a full rebuild including PF reacquisition.
+**Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover). In `get_token()`: try region meta generateToken first; on failure try the public token API (`https://www.privateinternetaccess.com/api/client/v2/token`); only if both fail, clear `region_*` and token/auth_/portforward_ so the next run re-selects a server pair. When `healthcheck_tunnel()` fails before provisioning, the same pattern clears `region_*`, `token`, `auth_*`, `peer_*`, and `portforward_*` so the next run does a full rebuild including PF reacquisition.
 
 ### Tunnel Healthcheck
 `healthcheck_tunnel()` runs twice per execution: once before provisioning (to detect a broken tunnel and trigger rebuild) and once after (to verify the tunnel is working). Checks: interface presence (`/sys/class/net/wg0`), TX transfer increase after a ping probe, handshake age < 300s, and return-path liveness (ping 10.0.0.1 via wg0). On failure before provisioning, region/token/auth/peer/portforward_* state is cleared for a full rebuild.

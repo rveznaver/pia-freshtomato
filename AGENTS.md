@@ -81,7 +81,7 @@ Always validate: `echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,
 ## Architecture
 
 ### State (`pia_config`)
-Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`)
+Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*` including `region_pf`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`). `region_pf` is set by `get_region()` from the server list (whether the region supports port forwarding) and is used by `get_portforward()` / `set_portforward()` to skip when the region does not support PF.
 
 **Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover). When `healthcheck_tunnel()` fails before provisioning, the same pattern clears `region_*`, `token`, `auth_*`, `peer_*`, and `portforward_*` so the next run does a full rebuild including PF reacquisition.
 
@@ -89,10 +89,12 @@ Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*`)
 `healthcheck_tunnel()` runs twice per execution: once before provisioning (to detect a broken tunnel and trigger rebuild) and once after (to verify the tunnel is working). Checks: interface presence (`/sys/class/net/wg0`), TX transfer increase after a ping probe, handshake age < 300s, and return-path liveness (ping 10.0.0.1 via wg0). On failure before provisioning, region/token/auth/peer/portforward_* state is cleared for a full rebuild.
 
 ### Port Forwarding (PF) token lifecycle
+- **Main gate**: The PF block (get_portforward, set_portforward) runs only when `pia_pf` is not `false`. The functions themselves check `region_pf` and skip (return 0 with `[=] Region does not support port forwarding`) when the region does not support PF; `pia_pf` is never overwritten by the script.
 - **State**: `portforward_signature`, `portforward_payload`, `portforward_port`, `portforward_exp` (expiry epoch; set when parsing getSignature response).
 - **Reuse**: Cached token is reused only when `portforward_exp` is set and remaining validity is >= 7 days (604800s). Near expiry the script clears `portforward_*` and reacquires via getSignature.
 - **Bind failure**: If bindPort returns non-OK, the script clears `portforward_*` and returns 0 (non-fatal) so the next cron run reacquires the token in `get_portforward()`. Do not call `get_portforward()` from `set_portforward()`.
 - **NAT idempotency**: Use `iptables -t nat -S PIA_NAT` and `grep -F` for full rule shape (`--dport ${portforward_port}` plus REDIRECT/DNAT target) so port or target changes are detected and rules are rewritten.
+- **DuckDNS**: Runs when `pia_duckdns` is not `false` (independent of `pia_pf`). Always updates the A record (VPN IP). The TXT record (port) is updated only when `portforward_port` is set (i.e. when PF ran for this region); otherwise the port part is skipped.
 
 ### IPv6 Leak Prevention
 `set_ipv6()` drops all routed IPv6 traffic via a dedicated `PIA_FORWARD_V6` ip6tables chain to prevent leaks bypassing the VPN. LAN-to-LAN IPv6 is unaffected (handled by bridge at layer 2, never enters FORWARD).

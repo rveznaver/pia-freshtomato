@@ -285,15 +285,8 @@ EOF
   local var_line var_cn var_meta_ip var_wg_ip var_region_pf var_found
   var_found='false'
 
-  # Disable port forwarding if region does not support it
   var_region_pf=$(echo "${vars_region}" | grep '^region_pf=' | head -1 | cut -d= -f2- | tr -d '"')
   [ -z "${var_region_pf:-}" ] && var_region_pf='false'
-  if [ "${var_region_pf}" != 'true' ] && [ "${pia_pf:-false}" != 'false' ]; then
-    printf "%s\n%s\n" "$(grep -v '^pia_pf=' pia_config 2>/dev/null || true)" "pia_pf=\"false\"" > pia_config
-    pia_pf='false'
-    echo "[!] Region does not support port forwarding, disabled"
-    logger -t pia_wireguard "Region does not support port forwarding, disabled"
-  fi
 
   while [ -n "${var_region_list}" ]; do
     var_line=$(echo "${var_region_list}" | sed -n '1p')
@@ -302,7 +295,7 @@ EOF
     var_wg_ip=$(echo "${var_line}" | cut -d# -f3)
     if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_meta_ip}:" --cacert pia_tmp_cert "https://${var_cn}/" 2>/dev/null && \
        curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_wg_ip}:" --cacert pia_tmp_cert "https://${var_cn}:1337/" 2>/dev/null; then
-      printf "%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "region_id=\"${pia_vpn}\"" "region_cn=\"${var_cn}\"" "region_meta_ip=\"${var_meta_ip}\"" "region_wg_ip=\"${var_wg_ip}\"" "region_wg_port=\"1337\"" > pia_config
+      printf "%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "region_id=\"${pia_vpn}\"" "region_cn=\"${var_cn}\"" "region_meta_ip=\"${var_meta_ip}\"" "region_wg_ip=\"${var_wg_ip}\"" "region_wg_port=\"1337\"" "region_pf=\"${var_region_pf}\"" > pia_config
       echo "[+] Region info ready (selected ${var_cn})"
       logger -t pia_wireguard "Selected ${var_cn}"
       var_found='true'
@@ -642,6 +635,7 @@ get_portforward() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
+  [ "${region_pf:-false}" != 'true' ] && echo '[!] Region does not support port forwarding' && return 0
   # Reuse cached PF token if expiration is set and >= 7 days (604800 seconds)
   if [ -n "${portforward_exp:-}" ]; then
     local var_remaining=$((portforward_exp - $(date +%s)))
@@ -692,6 +686,7 @@ set_portforward() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
+  [ "${region_pf:-false}" != 'true' ] && echo '[!] Region does not support port forwarding' && return 0
   # Validate required variables
   [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${auth_server_vip:-}" ] && error_exit "auth_server_vip not set"
@@ -792,7 +787,6 @@ set_duckdns() {
 
   [ -z "${var_domain}" ] && error_exit "DuckDNS domain is empty"
   [ -z "${var_token}" ] && error_exit "DuckDNS token is empty"
-  [ -z "${portforward_port:-}" ] && error_exit "portforward_port not set (port forwarding must be enabled)"
   [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
 
   # Update DuckDNS A record (IP address)
@@ -800,12 +794,15 @@ set_duckdns() {
   var_response_ip=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&ip=${region_wg_ip}" 2>&1) || error_exit "DuckDNS IP update failed: ${var_response_ip}"
   [ "${var_response_ip}" = "OK" ] || error_exit "DuckDNS IP update failed: ${var_response_ip}"
 
-  # Update DuckDNS TXT record (port number)
-  local var_response_txt
-  var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}" 2>&1) || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
-  [ "${var_response_txt}" = "OK" ] || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
-
-  echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"
+  # Update DuckDNS TXT record (port) when port forwarding is active
+  if [ -n "${portforward_port:-}" ]; then
+    local var_response_txt
+    var_response_txt=$(curl -sSGm 5 "https://www.duckdns.org/update?domains=${var_domain}&token=${var_token}&txt=${portforward_port}" 2>&1) || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
+    [ "${var_response_txt}" = "OK" ] || error_exit "DuckDNS TXT update failed: ${var_response_txt}"
+    echo "[+] DNS records updated: ${var_domain}.duckdns.org A=${region_wg_ip} TXT=${portforward_port}"
+  else
+    echo "[+] DNS record updated: ${var_domain}.duckdns.org A=${region_wg_ip}"
+  fi
 }
 
 logger -t pia_wireguard "PIA WireGuard script started"
@@ -839,10 +836,10 @@ fi
 if [ "${pia_pf:-false}" != 'false' ]; then
   get_portforward
   set_portforward
+fi
 
-  if [ "${pia_duckdns:-false}" != 'false' ]; then
-    set_duckdns
-  fi
+if [ "${pia_duckdns:-false}" != 'false' ]; then
+  set_duckdns
 fi
 
 ### OPTIONAL

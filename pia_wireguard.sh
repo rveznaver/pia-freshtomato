@@ -269,8 +269,8 @@ EOF
   )
   var_php=$(echo "${var_php}" | sed "s/REGION_ID/${pia_vpn}/g")
   vars_region=$(echo "${var_json}" | php -r "${var_php}" 2>/dev/null)
-  echo "${vars_region}" | grep -q '^ERROR:' && error_exit "$(echo "${vars_region}" | head -1)"
-  [ -n "${vars_region}" ] || error_exit "Failed to parse region or region validation failed"
+  [ -z "${vars_region}" ] && error_exit "Failed to parse region or region validation failed"
+  echo "${vars_region}" | grep -q '^ERROR:' && error_exit "${vars_region}"
 
   # Parse region_list (comma-separated items, each item is cn#meta_ip#wg_ip, matched by cn)
   local var_region_list
@@ -642,10 +642,15 @@ get_portforward() {
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
-  # Skip if port forward already exists (idempotent)
-  if [ -n "${portforward_port:-}" ] && [ -n "${portforward_signature:-}" ] && [ -n "${portforward_payload:-}" ]; then
-    echo '[=] Port forward already exists'
-    return 0
+  # Reuse cached PF token if expiration is set and >= 7 days (604800 seconds)
+  if [ -n "${portforward_exp:-}" ]; then
+    local var_remaining=$((portforward_exp - $(date +%s)))
+    if [ "${var_remaining}" -ge 604800 ]; then
+      echo '[=] Port forward already exists'
+      return 0
+    fi
+    echo '[~] Port forward near expiry, reacquiring'
+    printf "%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" > pia_config
   fi
   # Validate required variables
   [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
@@ -660,9 +665,13 @@ get_portforward() {
   var_php=$(cat <<'EOF'
     $d = json_decode(stream_get_contents(STDIN));
     if (!$d || ($d->status ?? "") !== "OK") exit(1);
+    $p = json_decode(base64_decode($d->payload));
+    $expires_epoch = strtotime($p->expires_at ?? "");
+    if ($expires_epoch === false) exit(1);
     echo "portforward_signature=\"$d->signature\"\n";
     echo "portforward_payload=\"$d->payload\"\n";
-    echo "portforward_port=\"" . json_decode(base64_decode($d->payload))->port . "\"\n";
+    echo "portforward_port=\"" . $p->port . "\"\n";
+    echo "portforward_exp=\"" . $expires_epoch . "\"\n";
 EOF
   )
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
@@ -698,35 +707,37 @@ set_portforward() {
   [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message
-  var_bind_response=$(curl -sGm 5 --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_cn}:19999/bindPort" --interface wg0)
+  var_bind_response=$(curl --retry 3 -sGm 5 --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_cn}:19999/bindPort" --interface wg0) || true
   # Remove certificate file
   rm -f pia_tmp_cert
   # Parse response
-  var_bind_status=$(echo "${var_bind_response}" | php -r 'echo json_decode(stream_get_contents(STDIN))->status ?? "";')
-  var_bind_message=$(echo "${var_bind_response}" | php -r 'echo json_decode(stream_get_contents(STDIN))->message ?? "";')
+  # shellcheck disable=SC2310
+  var_bind_status=$(echo "${var_bind_response}" | php -r 'echo json_decode(stream_get_contents(STDIN))->status ?? "";' 2>/dev/null) || true
+  # shellcheck disable=SC2310
+  var_bind_message=$(echo "${var_bind_response}" | php -r 'echo json_decode(stream_get_contents(STDIN))->message ?? "";' 2>/dev/null) || true
   if [ "${var_bind_status}" = "OK" ]; then
     echo "[*] Port binding: ${var_bind_message}"
   else
-    echo "[!] WARNING: Port bind failed: ${var_bind_response}"
-    logger -t pia_wireguard "WARNING: Port bind failed"
+    echo "[!] WARNING: Port bind failed"
+    logger -t pia_wireguard "WARNING: Port bind failed, clearing portforward_* for next run"
+    printf "%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" > pia_config
+    return 0
   fi
 
   # Parse IP and port from pia_pf
   local var_pf_ip="${pia_pf%:*}" var_pf_port="${pia_pf#*:}"
 
-  # Check if already configured (idempotent)
-  if iptables -t nat -L PIA_NAT -n >/dev/null 2>&1 && \
-     iptables -L PIA_PORTFORWARD -n >/dev/null 2>&1; then
-    # Verify configuration matches current pia_pf
+  # Check if already configured (idempotent) — match full rule shape from iptables -S
+  local var_nat_rules
+  var_nat_rules=$(iptables -t nat -S PIA_NAT 2>/dev/null) || true
+  if [ -n "${var_nat_rules}" ] && iptables -L PIA_PORTFORWARD -n >/dev/null 2>&1; then
     if [ "${var_pf_ip}" = "0.0.0.0" ]; then
-      # Check for REDIRECT
-      if iptables -t nat -L PIA_NAT -n 2>/dev/null | grep -q "redir ports ${var_pf_port}"; then
+      if echo "${var_nat_rules}" | grep -F -- "--dport ${portforward_port}" | grep -qF "REDIRECT --to-ports ${var_pf_port}"; then
         echo '[=] Port forward already configured'
         return 0
       fi
     else
-      # Check for DNAT to current destination
-      if iptables -t nat -L PIA_NAT -n 2>/dev/null | grep -q "to:${pia_pf}"; then
+      if echo "${var_nat_rules}" | grep -F -- "--dport ${portforward_port}" | grep -qF "DNAT --to-destination ${pia_pf}"; then
         echo '[=] Port forward already configured'
         return 0
       fi
@@ -806,7 +817,7 @@ get_cert
 # shellcheck disable=SC2310
 if ! healthcheck_tunnel; then
   logger -t pia_wireguard "WARNING: Tunnel unhealthy, rebuilding VPN"
-  printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^peer_' pia_config 2>/dev/null || true)" > pia_config
+  printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_' pia_config 2>/dev/null || true)" > pia_config
 fi
 
 get_region

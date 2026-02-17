@@ -50,9 +50,14 @@ healthcheck_tunnel() {
 
   # RX substitute: FreshTomato WG RX counter is always 0, so ping confirms
   # the return path is working. Also generates traffic on a fresh tunnel.
-  ping -I wg0 -c 1 -W 1 10.0.0.1 >/dev/null 2>&1 || {
-    echo '[*] Metadata ping failed (no return path)'
-    logger -t pia_wireguard '[*] Metadata ping failed (no return path)'
+  # Multi-probe: retry on transient loss; fallback target guards against
+  # PIA metadata server being down. Happy path returns near-instantly.
+  ping -I wg0 -c 1 -W 2 10.0.0.1 >/dev/null 2>&1 \
+    || ping -I wg0 -c 1 -W 2 10.0.0.1 >/dev/null 2>&1 \
+    || ping -I wg0 -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 \
+    || {
+    echo '[*] Connectivity probe failed (no return path)'
+    logger -t pia_wireguard '[*] Connectivity probe failed (no return path)'
     return 1
   }
 

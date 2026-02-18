@@ -78,7 +78,7 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 ## Features
 - **Idempotent**: Safe to run multiple times, only configures what's needed
 - **Robust**: Automatic retries with exponential backoff for flaky operations
-- **Secure**: RSA signature verification of PIA server list, TLS certificate pinning for API calls
+- **Secure**: PIA CA and server-list RSA pubkey embedded (gzip+base64); TLS pinning and signature verification for all API calls
 - **Modular**: Each stage is independent and can be run separately
 - **Tunnel healthcheck**: Verifies handshake age, TX transfer, and return-path liveness on every run; unhealthy tunnel triggers automatic rebuild
 - **Region change detection**: Automatically clears dependent state when switching regions
@@ -125,8 +125,6 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [+] Script ready
 [ ] Initializing WireGuard...
 [+] WireGuard ready
-[ ] Downloading PIA certificate...
-[+] Certificate ready
 [=] No session state, skipping healthcheck
 [ ] Fetching PIA region info...
 [*] Server list signature verified
@@ -168,7 +166,6 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [+] Script ready
 [ ] Initializing WireGuard...
 [+] WireGuard ready
-[=] Certificate already exists
 [ ] Checking tunnel health...
 [=] Tunnel healthy (handshake age: 45s)
 [=] Region info already exists (cached server reachable)
@@ -197,23 +194,22 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 
 The script runs through these stages sequentially:
 
-1. **init_script**: Validates credentials, sets defaults, saves config
+1. **init_script**: Validates credentials, sets defaults, decodes embedded CA and server-list pubkey, saves config
 2. **init_module**: Loads WireGuard kernel module, creates `wg0` interface
-3. **get_cert**: Downloads and caches PIA certificate
-4. **healthcheck_tunnel** (pre-flight): Checks tunnel health; if unhealthy, clears session state to trigger a full rebuild
-5. **get_region**: Fetches region server information, verifies signature, selects first reachable server
-6. **get_token**: Generates authentication token
-7. **gen_peer**: Generates WireGuard key pair
-8. **get_auth**: Authenticates with PIA and gets server details
-9. **set_wg**: Configures WireGuard interface and brings it up
-10. **set_firewall**: Configures iptables rules for VPN traffic
-11. **set_ipv6**: Drops routed IPv6 traffic to prevent leaks bypassing the VPN
-12. **set_routes**: Sets up policy-based routing
-13. **healthcheck_tunnel** (verification): Confirms tunnel is healthy; exits with error if not
-14. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
-15. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
-16. **set_portforward** (optional): Configures NAT rules for port forwarding
-17. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
+3. **healthcheck_tunnel** (pre-flight): Checks tunnel health; if unhealthy, clears session state to trigger a full rebuild
+4. **get_region**: Fetches region server information, verifies signature, selects first reachable server
+5. **get_token**: Generates authentication token
+6. **gen_peer**: Generates WireGuard key pair
+7. **get_auth**: Authenticates with PIA and gets server details
+8. **set_wg**: Configures WireGuard interface and brings it up
+9. **set_firewall**: Configures iptables rules for VPN traffic
+10. **set_ipv6**: Drops routed IPv6 traffic to prevent leaks bypassing the VPN
+11. **set_routes**: Sets up policy-based routing
+12. **healthcheck_tunnel** (verification): Confirms tunnel is healthy; exits with error if not
+13. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
+14. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
+15. **set_portforward** (optional): Configures NAT rules for port forwarding
+16. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
 
 If you set `pia_pf` but the selected region does not support port forwarding, the script skips the PF and DuckDNS steps and logs that the region does not support port forwarding.
 

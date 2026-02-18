@@ -43,7 +43,7 @@ Use `error_exit()` with context: `[ -z "${token:-}" ] && error_exit "token not s
 - Lint with: `shellcheck -x -a -S style -o all -s dash pia_wireguard.sh`
 
 ### Variables
-**Prefixes**: `pia_*` (user config), `var_*` (local), `region_*` (cached), `token*` (session), `auth_*` (WireGuard), `peer_*` (keys), `portforward_*` (port data)
+**Prefixes**: `pia_*` (user config; `pia_cert`/`pia_pubkey` are decoded from embedded `PIA_CA`/`PIA_SIG` in init, not stored in config), `var_*` (local), `region_*` (cached), `token*` (session), `auth_*` (WireGuard), `peer_*` (keys), `portforward_*` (port data)
 
 **Always use**: `${variable:-}` not `$variable` (prevents `set -u` failures)
 
@@ -81,7 +81,7 @@ Always validate: `echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,
 ## Architecture
 
 ### State (`pia_config`)
-Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*` including `region_pf`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`). `region_pf` is set by `get_region()` from the server list (whether the region supports port forwarding) and is used by `get_portforward()` / `set_portforward()` to skip when the region does not support PF.
+Three layers: User config (`pia_*`), cached metadata (`region_*` including `region_pf`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`). CA and server-list pubkey are not in config: they are embedded in the script (`PIA_CA`, `PIA_SIG`, gzip+base64) and decoded to `pia_cert` / `pia_pubkey` in `init_script()` each run (in-process only). `region_pf` is set by `get_region()` from the server list (whether the region supports port forwarding) and is used by `get_portforward()` / `set_portforward()` to skip when the region does not support PF.
 
 **Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover). In `get_token()`: try region meta generateToken first; on failure try the public token API (`https://www.privateinternetaccess.com/api/client/v2/token`); only if both fail, clear `region_*` and token/auth_/portforward_ so the next run re-selects a server pair. When `healthcheck_tunnel()` fails before provisioning, the same pattern clears `region_*`, `token`, `auth_*`, `peer_*`, and `portforward_*` so the next run does a full rebuild including PF reacquisition.
 
@@ -100,7 +100,7 @@ Three layers: User config (`pia_*`), cached metadata (`certificate`, `region_*` 
 `set_ipv6()` drops all routed IPv6 traffic via a dedicated `PIA_FORWARD_V6` ip6tables chain to prevent leaks bypassing the VPN. LAN-to-LAN IPv6 is unaffected (handled by bridge at layer 2, never enters FORWARD).
 
 ### WAN and PIA API
-All PIA API traffic that must work when the tunnel is broken (get_cert, get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
+All PIA API traffic that must work when the tunnel is broken (get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
 
 ### Routing
 - Table 1337: `default dev wg0` plus throw routes so local traffic falls through to main:
@@ -126,8 +126,8 @@ Validate all user input (IPs, ports, formats) with regex to prevent injection
 - Config: credentials in `pia_config` (git-ignored)
 
 ### Verification
-- Server list: RSA signature with hardcoded pubkey (`openssl dgst -sha256 -verify`)
-- TLS: pinned certificate (`curl --cacert`)
+- Server list: RSA signature with embedded pubkey (`PIA_SIG` → `pia_pubkey`; `openssl dgst -sha256 -verify`)
+- TLS: pinned CA from embedded cert (`PIA_CA` → `pia_cert`; `curl --cacert`)
 
 ---
 

@@ -15,6 +15,11 @@ set -eu  # Exit on error or undefined variable
 export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
+# Embedded PIA CA (gzip+base64); used when pia_cert not set
+PIA_CA='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'
+# Embedded PIA server list RSA public key (gzip+base64); used when pia_pubkey not set
+PIA_SIG='H4sIACA4lWkCA2WRy3aqMABF53xF5y5XtILCMNFAqLwxVJgJDc/GgDwEv/62d9o9Omuf4V6vf0DYMJ03jyLLPL6dcfzr1pJtmsisoYOKpiubytCeGwR9rEPoHqGvwt//WJx/NoYvKybPq0ILIKibJgojiic98JPntYxBjPPwbBV62C+BYfQR53V1RTxMr+/9bk5rIPJxiofGbjwQeTpZNAxUMUvxKgtq77V8zS95b3nxoW7xc+uQpHaXC6PsIRS2vTdWWfmdCzI7ijm9j1E26nmyJFMmqbCdlRw9zPZdfLY6MLShpUlO6cftRqrraRhjTxVqVMbDUo903JWHR+Prwp6nUbg6kfb3JttEPkc9mY55J1+0SS2WCg1+sCjy7pvd2guyLzuZz5HpywEzLC+qBrDvHUsYVioV4d1gGmrATYmAMn13jPFPfVMWIhjobA90W+opOzB1CLttveLjJiT2ciYV+Vq5PaeS6Zsn6EMk/Y+CndOfTv8AspaWWcMBAAA='
+
 # Cleanup temporary files on exit
 trap 'rm -f pia_tmp_*' EXIT
 
@@ -129,6 +134,9 @@ init_script() {
   if [ "${pia_duckdns}" != 'false' ]; then
     echo "${pia_duckdns}" | grep -q ':' || error_exit "pia_duckdns must be in format DOMAIN:TOKEN"
   fi
+  # Decode embedded cert/pubkey to raw PEM once (not written to config; used in-process)
+  [ -n "${PIA_CA:-}" ] && [ -z "${pia_cert:-}" ] && pia_cert=$(echo "${PIA_CA}" | openssl base64 -A -d | gzip -d)
+  [ -n "${PIA_SIG:-}" ] && [ -z "${pia_pubkey:-}" ] && pia_pubkey=$(echo "${PIA_SIG}" | openssl base64 -A -d | gzip -d)
 
   # Save credentials to config (preserve other variables)
   local vars_init
@@ -163,36 +171,6 @@ init_module() {
   echo '[+] WireGuard ready'
 }
 
-get_cert() {
-  echo '[ ] Downloading PIA certificate...'
-  # Load config
-  # shellcheck disable=SC1091
-  [ -f pia_config ] && . ./pia_config
-
-  # Skip if certificate already exists (idempotent)
-  if [ -n "${certificate:-}" ]; then
-    echo '[=] Certificate already exists'
-    return 0
-  fi
-
-  # WAN interface for PIA API (recovery when tunnel is broken)
-  local var_wan
-  var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
-  [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
-
-  # Download certificate
-  local var_cert
-  var_cert=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss 'https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt')
-  [ -n "${var_cert}" ] || error_exit "Certificate download failed"
-
-  # Save to config (base64 encoded)
-  local var_cert_encoded
-  var_cert_encoded=$(echo "${var_cert}" | openssl base64 -A)
-  printf "%s\n%s\n" "$(grep -v '^certificate=' pia_config 2>/dev/null || true)" "certificate=\"${var_cert_encoded}\"" > pia_config
-
-  echo '[+] Certificate ready'
-}
-
 get_region() {
   echo '[ ] Fetching PIA region info...'
   # Load config
@@ -218,7 +196,7 @@ get_region() {
   # Optional connectivity test for cached server; skip refetch if both meta and WG reachable
   if [ -n "${region_cn:-}" ] && [ -n "${region_meta_ip:-}" ] && [ -n "${region_wg_ip:-}" ] && \
      [ "${region_id:-}" = "${pia_vpn}" ]; then
-    [ -z "${certificate:-}" ] || { echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert 2>/dev/null; }
+    [ -n "${pia_cert:-}" ] && echo "${pia_cert}" > pia_tmp_cert
     if [ -s pia_tmp_cert ]; then
       if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/" 2>/dev/null && \
          curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert "https://${region_cn}:1337/" 2>/dev/null; then
@@ -237,19 +215,11 @@ get_region() {
   var_json=$(echo "${var_response}" | head -1)
   var_signature=$(echo "${var_response}" | tail -n 6)
 
-  # Verify signature using PIA's hardcoded RSA public key
+  # Verify signature using PIA's RSA public key (embedded or pia_pubkey; already raw PEM)
   # https://github.com/pia-foss/manual-connections/issues/21
-  cat > pia_tmp_pubkey <<'EOF'
------BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzLYHwX5Ug/oUObZ5eH5P
-rEwmfj4E/YEfSKLgFSsyRGGsVmmjiXBmSbX2s3xbj/ofuvYtkMkP/VPFHy9E/8ox
-Y+cRjPzydxz46LPY7jpEw1NHZjOyTeUero5e1nkLhiQqO/cMVYmUnuVcuFfZyZvc
-8Apx5fBrIp2oWpF/G9tpUZfUUJaaHiXDtuYP8o8VhYtyjuUu3h7rkQFoMxvuoOFH
-6nkc0VQmBsHvCfq4T9v8gyiBtQRy543leapTBMT34mxVIQ4ReGLPVit/6sNLoGLb
-gSnGe9Bk/a5V/5vlqeemWF0hgoRtUxMtU1hFbe7e8tSq1j+mu0SHMyKHiHd+OsmU
-IQIDAQAB
------END PUBLIC KEY-----
-EOF
+  [ -n "${pia_pubkey:-}" ] || error_exit "pia_pubkey not set"
+  echo "${pia_pubkey}" > pia_tmp_pubkey
+  [ -s pia_tmp_pubkey ] || error_exit "Failed to write public key"
   echo "${var_signature}" | openssl base64 -d > pia_tmp_sig
   printf "%s" "${var_json}" > pia_tmp_json
   if ! openssl dgst -sha256 -verify pia_tmp_pubkey -signature pia_tmp_sig pia_tmp_json >/dev/null 2>&1; then
@@ -284,7 +254,7 @@ EOF
   [ -n "${var_region_list}" ] || error_exit "No meta or WG servers in region"
 
   # Certificate for connectivity probe
-  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert 2>/dev/null
+  echo "${pia_cert}" > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Certificate not available for connectivity test"
 
   # First reachable (cn, meta_ip, wg_ip) pair wins
@@ -330,14 +300,14 @@ get_token() {
   [ -z "${pia_pass:-}" ] && error_exit "pia_pass not set"
   [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${region_meta_ip:-}" ] && error_exit "region_meta_ip not set"
-  [ -z "${certificate:-}" ] && error_exit "certificate not set"
+  [ -z "${pia_cert:-}" ] && error_exit "pia_cert not set"
   # WAN interface for PIA API (recovery when tunnel is broken)
   local var_wan
   var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
   [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
-  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
+  echo "${pia_cert}" > pia_tmp_cert
+  [ -s pia_tmp_cert ] || error_exit "Failed to write certificate"
   local var_php var_token
   # Parse token from JSON; meta API has status+token, public v2 API has token only
   var_php=$(cat <<'EOF'
@@ -402,14 +372,14 @@ get_auth() {
   [ -z "${region_wg_port:-}" ] && error_exit "region_wg_port not set"
   [ -z "${token:-}" ] && error_exit "token not set"
   [ -z "${peer_pubkey:-}" ] && error_exit "peer_pubkey not set"
-  [ -z "${certificate:-}" ] && error_exit "certificate not set"
+  [ -z "${pia_cert:-}" ] && error_exit "pia_cert not set"
   # WAN interface for PIA API (recovery when tunnel is broken)
   local var_wan
   var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
   [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
-  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
+  echo "${pia_cert}" > pia_tmp_cert
+  [ -s pia_tmp_cert ] || error_exit "Failed to write certificate"
   local var_php vars_auth
   # PHP code validates status before parsing
   var_php=$(cat <<'EOF'
@@ -664,10 +634,10 @@ get_portforward() {
   [ -z "${region_cn:-}" ] && error_exit "region_cn not set"
   [ -z "${auth_server_vip:-}" ] && error_exit "auth_server_vip not set"
   [ -z "${token:-}" ] && error_exit "token not set"
-  [ -z "${certificate:-}" ] && error_exit "certificate not set"
+  [ -z "${pia_cert:-}" ] && error_exit "pia_cert not set"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
-  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
+  echo "${pia_cert}" > pia_tmp_cert
+  [ -s pia_tmp_cert ] || error_exit "Failed to write certificate"
   # Request port forward signature
   local var_php vars_portforward
   var_php=$(cat <<'EOF'
@@ -708,12 +678,12 @@ set_portforward() {
   [ -z "${portforward_payload:-}" ] && error_exit "portforward_payload not set"
   [ -z "${portforward_port:-}" ] && error_exit "portforward_port not set"
   [ -z "${pia_pf:-}" ] && error_exit "pia_pf not set"
-  [ -z "${certificate:-}" ] && error_exit "certificate not set"
+  [ -z "${pia_cert:-}" ] && error_exit "pia_cert not set"
   # Validate pia_pf format (must be IP:PORT)
   echo "${pia_pf}" | grep -q '^[0-9.]\+:[0-9]\+$' || error_exit "pia_pf must be in format IP:PORT (e.g., 192.168.1.10:2022)"
   # Write certificate file (needed by curl)
-  echo "${certificate}" | openssl base64 -A -d > pia_tmp_cert
-  [ -s pia_tmp_cert ] || error_exit "Failed to decode certificate"
+  echo "${pia_cert}" > pia_tmp_cert
+  [ -s pia_tmp_cert ] || error_exit "Failed to write certificate"
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message
   var_bind_response=$(curl --retry 3 -sGm 5 --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_cn}:19999/bindPort" --interface wg0) || true
@@ -823,7 +793,6 @@ logger -t pia_wireguard "PIA WireGuard script started"
 
 init_script
 init_module
-get_cert
 
 # shellcheck disable=SC2310
 if ! healthcheck_tunnel; then

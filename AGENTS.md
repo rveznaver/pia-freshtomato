@@ -43,7 +43,7 @@ Use `error_exit()` with context: `[ -z "${token:-}" ] && error_exit "token not s
 - Lint with: `shellcheck -x -a -S style -o all -s dash pia_wireguard.sh`
 
 ### Variables
-**Prefixes**: `pia_*` (user config; `pia_cert`/`pia_pubkey` are decoded from embedded `PIA_CA`/`PIA_SIG` in init, not stored in config), `var_*` (local), `region_*` (cached), `token*` (session), `auth_*` (WireGuard), `peer_*` (keys), `portforward_*` (port data)
+**Prefixes**: `pia_*` (user config; `pia_cert`/`pia_pubkey` are decoded from embedded `PIA_CA`/`PIA_SIG` in init, not stored in config), `var_*` (local), `region_*` (cached), `token*` (session), `auth_*` (WireGuard), `peer_*` (keys), `portforward_*` (port data), `shadowsocks_*` (Shadowsocks server info; independent lifecycle from region/token/auth)
 
 **Always use**: `${variable:-}` not `$variable` (prevents `set -u` failures)
 
@@ -81,12 +81,12 @@ Always validate: `echo "${ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,
 ## Architecture
 
 ### State (`pia_config`)
-Three layers: User config (`pia_*`), cached metadata (`region_*` including `region_pf`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`). CA and server-list pubkey are not in config: they are embedded in the script (`PIA_CA`, `PIA_SIG`, gzip+base64) and decoded to `pia_cert` / `pia_pubkey` in `init_script()` each run (in-process only). `region_pf` is set by `get_region()` from the server list (whether the region supports port forwarding) and is used by `get_portforward()` / `set_portforward()` to skip when the region does not support PF.
+Four layers: User config (`pia_*`), cached metadata (`region_*` including `region_pf`), session state (`token`, `auth_*`, `peer_*`, `portforward_*`), and Shadowsocks state (`shadowsocks_*`). CA and server-list pubkey are not in config: they are embedded in the script (`PIA_CA`, `PIA_SIG`, gzip+base64) and decoded to `pia_cert` / `pia_pubkey` in `init_script()` each run (in-process only). `region_pf` is set by `get_region()` from the server list (whether the region supports port forwarding) and is used by `get_portforward()` / `set_portforward()` to skip when the region does not support PF.
 
-**Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover). In `get_token()`: try region meta generateToken first; on failure try the public token API (`https://www.privateinternetaccess.com/api/client/v2/token`); only if both fail, clear `region_*` and token/auth_/portforward_ so the next run re-selects a server pair. When `healthcheck_tunnel()` fails before provisioning, the same pattern clears `region_*`, `token`, `auth_*`, `peer_*`, and `portforward_*` so the next run does a full rebuild including PF reacquisition.
+**Cascade invalidation**: Region change clears dependent state: `grep -v '^region_\|^token=\|^auth_\|^peer_\|^portforward_'`. On get_auth or set_wg failure the script also clears `region_*`, `token`, and `auth_*` so the next run refetches the serverlist and selects the first reachable server (failover). In `get_token()`: try region meta generateToken first; on failure try the public token API (`https://www.privateinternetaccess.com/api/client/v2/token`); only if both fail, clear `region_*` and token/auth_/portforward_ so the next run re-selects a server pair. When `healthcheck_tunnel()` fails before provisioning, the same pattern clears `region_*`, `token`, `auth_*`, `peer_*`, and `portforward_*` so the next run does a full rebuild including PF reacquisition. **Important**: `shadowsocks_*` is NOT part of these cascade patterns -- it has its own independent lifecycle (see Shadowsocks section below).
 
 ### Tunnel Healthcheck
-`healthcheck_tunnel()` runs twice per execution: once before provisioning (to detect a broken tunnel and trigger rebuild) and once after (to verify the tunnel is working). Checks: interface presence (`/sys/class/net/wg0`), TX transfer increase after a ping probe, handshake age < 300s, and return-path liveness (ping 10.0.0.1 via wg0). On failure before provisioning, region/token/auth/peer/portforward_* state is cleared for a full rebuild.
+`healthcheck_tunnel()` runs twice per execution: once before provisioning (to detect a broken tunnel and trigger rebuild) and once after (to verify the tunnel is working). Checks: interface presence (`/sys/class/net/wg0`), sslocal liveness when endpoint is `127.0.0.1:51820` (via `netstat -lunp | grep ':51820 '`), TX transfer increase after a ping probe, handshake age < 300s, and return-path liveness (ping 10.0.0.1 via wg0). On failure before provisioning, region/token/auth/peer/portforward_* state is cleared for a full rebuild.
 
 ### Port Forwarding (PF) token lifecycle
 - **Main gate**: The PF block (get_portforward, set_portforward) runs only when `pia_pf` is not `false`. The functions themselves check `region_pf` and skip (return 0 with `[=] Region does not support port forwarding`) when the region does not support PF; `pia_pf` is never overwritten by the script.
@@ -95,6 +95,16 @@ Three layers: User config (`pia_*`), cached metadata (`region_*` including `regi
 - **Bind failure**: If bindPort returns non-OK, the script clears `portforward_*` and returns 0 (non-fatal) so the next cron run reacquires the token in `get_portforward()`. Do not call `get_portforward()` from `set_portforward()`.
 - **NAT idempotency**: Use `iptables -t nat -S PIA_NAT` and `grep -F` for full rule shape (`--dport ${portforward_port}` plus REDIRECT/DNAT target) so port or target changes are detected and rules are rewritten.
 - **DuckDNS**: Runs when `pia_duckdns` is not `false` (independent of `pia_pf`). Always updates the A record (VPN IP). The TXT record (port) is updated only when `portforward_port` is set (i.e. when PF ran for this region); otherwise the port part is skipped.
+
+### Shadowsocks Obfuscation
+- **User config**: `pia_ss` (default `false`; set to a Shadowsocks region name to enable). Independent of `pia_vpn`.
+- **State**: `shadowsocks_region`, `shadowsocks_host`, `shadowsocks_port`, `shadowsocks_key`, `shadowsocks_cipher` -- fetched from `https://serverlist.piaservers.net/shadow_socks` (RSA-signed, same key as WG server list).
+- **Independent lifecycle**: `shadowsocks_*` is NOT cleared by region/token/auth/peer/portforward cascade invalidation. The sslocal tunnel may be working perfectly while WG auth fails. Only `get_shadowsocks()` clears `shadowsocks_*` (when `pia_ss` changes).
+- **Process detection**: No PID saved to config. Use `netstat -lunp | grep ':51820 '` (BusyBox lsof has no options). PID extracted with `awk '/:51820 / {split($NF, a, "/"); print a[1]}'`.
+- **Forward-addr restart**: `set_shadowsocks()` checks the running sslocal's `--forward-addr` via `/proc/PID/cmdline`. If `region_wg_ip:region_wg_port` changed (server failover), sslocal is killed and restarted with the new forward address. The `shadowsocks_*` config is NOT re-fetched.
+- **MTU**: When active, wg0 MTU is 1400 (1500 WAN - 60 SS overhead - 40 WG overhead). When disabled, default 1420.
+- **Routing**: sslocal outbound uses `--outbound-fwmark 3851` (0xf0b) so packets route via WAN, not via the VPN table. No throw route needed for `shadowsocks_host`.
+- **Helper**: `kill_shadowsocks()` finds and kills sslocal via netstat. Called by `get_shadowsocks()` on region change and by `set_shadowsocks()` on forward-addr mismatch.
 
 ### IPv6 Leak Prevention
 `set_ipv6()` drops all routed IPv6 traffic via a dedicated `PIA_FORWARD_V6` ip6tables chain to prevent leaks bypassing the VPN. LAN-to-LAN IPv6 is unaffected (handled by bridge at layer 2, never enters FORWARD).

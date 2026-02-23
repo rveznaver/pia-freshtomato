@@ -59,6 +59,11 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_pf='0.0.0.0:22' ./pia_wireguard.
 pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_vpn='us_california' ./pia_wireguard.sh
 ```
 
+### With Shadowsocks Obfuscation
+```bash
+pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_ss='us_south_west' ./pia_wireguard.sh
+```
+
 ### All Options
 ```bash
 pia_user='<USERNAME>' \
@@ -67,6 +72,7 @@ pia_vpn='uk_london' \
 pia_pf='192.168.1.100:8080' \
 pia_bypass='1.2.3.4 5.6.7.8' \
 pia_duckdns='mydomain:duckdns-token' \
+pia_ss='uk' \
 ./pia_wireguard.sh
 ```
 
@@ -88,6 +94,7 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 - **Port forwarding**: Forward to devices or router itself with automatic NAT configuration
 - **Split tunnelling**: Optional VPN bypass for specific IPs (enabled by default for Google RCS)
 - **Dynamic DNS**: Optional DuckDNS updates with VPN IP and forwarded port
+- **Shadowsocks obfuscation**: Optional tunneling of WireGuard traffic through Shadowsocks to bypass DPI/firewalls; independent of the WireGuard region
 - **Custom iptables chains**: Clean rule isolation using named chains (PIA_*)
 - **Syslog logging**: Automatic logging of errors, warnings, and important events
 - **Visual feedback**: Clear status indicators for all operations
@@ -100,6 +107,7 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 - `php` (or `php-cli`) for JSON parsing
 - `openssl` for RSA signature verification and base64 encoding/decoding
 - `ipset` with kernel modules: `ip_set`, `ip_set_hash_ip`, `xt_set` for VPN bypass
+- `sslocal` from [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) (only if using `pia_ss`)
 - Standard POSIX tools: `sed`, `grep`
 
 ## Configuration Variables
@@ -112,6 +120,7 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 | `pia_pf` | No | `false` | Port forwarding destination in format `IP:PORT` (use `0.0.0.0:PORT` for router) |
 | `pia_bypass` | No | Google RCS IPs | Space-separated IPs to bypass VPN (set to `false` to disable) |
 | `pia_duckdns` | No | `false` | DuckDNS dynamic DNS in format `DOMAIN:TOKEN` |
+| `pia_ss` | No | `false` | Shadowsocks region for WireGuard obfuscation (e.g., `us_south_west`, `nl_amsterdam`) |
 
 ## Example Output
 
@@ -122,6 +131,7 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [*] pia_pf (port forwarding) not set, defaulting to false
 [*] pia_bypass (split tunneling by IP) not set, defaulting to Google RCS servers
 [*] pia_duckdns (DuckDNS dynamic DNS) not set, defaulting to false
+[*] pia_ss (Shadowsocks obfuscation) not set, defaulting to false
 [+] Script ready
 [ ] Initializing WireGuard...
 [+] WireGuard ready
@@ -129,12 +139,16 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [ ] Fetching PIA region info...
 [*] Server list signature verified
 [+] Region info ready (selected ...)
+[ ] Fetching Shadowsocks server info...
+[=] Shadowsocks disabled
 [ ] Generating PIA token...
 [+] Token ready
 [ ] Generating peer keys...
 [+] Keys ready
 [ ] Authenticating to PIA...
 [+] Auth ready
+[ ] Configuring Shadowsocks tunnel...
+[=] Shadowsocks disabled
 [ ] Configuring WireGuard...
 [+] WireGuard ready
 [ ] Configuring firewall...
@@ -169,9 +183,13 @@ pia_user='<USERNAME>' pia_pass='<PASSWORD>' pia_bypass='false' ./pia_wireguard.s
 [ ] Checking tunnel health...
 [=] Tunnel healthy (handshake age: 45s)
 [=] Region info already exists (cached server reachable)
+[ ] Fetching Shadowsocks server info...
+[=] Shadowsocks disabled
 [=] Token already exists
 [=] Keys already exist
 [=] Auth already exists
+[ ] Configuring Shadowsocks tunnel...
+[=] Shadowsocks disabled
 [=] WireGuard already configured
 [=] Firewall already configured
 [=] IPv6 leak prevention already configured
@@ -196,20 +214,22 @@ The script runs through these stages sequentially:
 
 1. **init_script**: Validates credentials, sets defaults, decodes embedded CA and server-list pubkey, saves config
 2. **init_module**: Loads WireGuard kernel module, creates `wg0` interface
-3. **healthcheck_tunnel** (pre-flight): Checks tunnel health; if unhealthy, clears session state to trigger a full rebuild
+3. **healthcheck_tunnel** (pre-flight): Checks tunnel health (including sslocal liveness when endpoint is `127.0.0.1:51820`); if unhealthy, clears session state to trigger a full rebuild
 4. **get_region**: Fetches region server information, verifies signature, selects first reachable server
-5. **get_token**: Generates authentication token
-6. **gen_peer**: Generates WireGuard key pair
-7. **get_auth**: Authenticates with PIA and gets server details
-8. **set_wg**: Configures WireGuard interface and brings it up
-9. **set_firewall**: Configures iptables rules for VPN traffic
-10. **set_ipv6**: Drops routed IPv6 traffic to prevent leaks bypassing the VPN
-11. **set_routes**: Sets up policy-based routing
-12. **healthcheck_tunnel** (verification): Confirms tunnel is healthy; exits with error if not
-13. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
-14. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
-15. **set_portforward** (optional): Configures NAT rules for port forwarding
-16. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
+5. **get_shadowsocks** (optional): Fetches Shadowsocks server list, verifies signature, parses server for the configured SS region
+6. **get_token**: Generates authentication token
+7. **gen_peer**: Generates WireGuard key pair
+8. **get_auth**: Authenticates with PIA and gets server details
+9. **set_shadowsocks** (optional): Starts or restarts sslocal tunnel (detects stale forward-addr on server failover)
+10. **set_wg**: Configures WireGuard interface (endpoint `127.0.0.1:51820` when SS active, MTU 1400/1420) and brings it up
+11. **set_firewall**: Configures iptables rules for VPN traffic
+12. **set_ipv6**: Drops routed IPv6 traffic to prevent leaks bypassing the VPN
+13. **set_routes**: Sets up policy-based routing
+14. **healthcheck_tunnel** (verification): Confirms tunnel is healthy; exits with error if not
+15. **set_bypass** (optional): Configures IPs to bypass VPN (enabled by default for Google RCS)
+16. **get_portforward** (optional): Requests port forwarding from PIA (skipped if the region does not support PF)
+17. **set_portforward** (optional): Configures NAT rules for port forwarding
+18. **set_duckdns** (optional): Updates DuckDNS with VPN IP and forwarded port
 
 If you set `pia_pf` but the selected region does not support port forwarding, the script skips the PF and DuckDNS steps and logs that the region does not support port forwarding.
 
@@ -317,6 +337,28 @@ Resolved IPs should appear in the set with a countdown timeout.
 - Static bypass IPs set by the script are permanent (`timeout 0`) and never expire
 - The iptables rules are unchanged — they match on the `pia_bypass` ipset regardless of how entries were added
 - Devices using DNS-over-HTTPS or hardcoded DNS servers bypass dnsmasq entirely, so their resolved IPs won't be added to the set
+
+### Shadowsocks Obfuscation
+
+When `pia_ss` is set to a Shadowsocks region name, WireGuard UDP traffic is tunneled through a Shadowsocks proxy to bypass DPI/firewalls. The `sslocal` binary from [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) must be installed on the router.
+
+**How it works:**
+1. The script fetches PIA's Shadowsocks server list (`https://serverlist.piaservers.net/shadow_socks`), verifies its RSA signature, and finds the server matching `pia_ss`
+2. `sslocal` starts in UDP tunnel mode, binding `127.0.0.1:51820` and forwarding to the real WireGuard endpoint via the Shadowsocks server
+3. WireGuard is configured with endpoint `127.0.0.1:51820` instead of the real server IP, and MTU is reduced to 1400 (from 1420) to account for double encapsulation
+4. `sslocal` outbound packets are marked with fwmark `0xf0b` so they route via WAN (bypassing the VPN routing table)
+
+**Available Shadowsocks regions** (as of Feb 2026):
+```
+ca_vancouver, japan, nl_amsterdam, swiss, uk, uk_manchester,
+us-newjersey, us3, us_seattle, us_south_west
+```
+
+**Important notes:**
+- The Shadowsocks region (`pia_ss`) is independent of the WireGuard region (`pia_vpn`). They are separate choices -- you can connect to a WG server in one region while tunneling through a Shadowsocks server in another.
+- Shadowsocks state (`shadowsocks_*` config) is independent of WireGuard auth/token lifecycle. If WG auth fails, the sslocal tunnel is not affected.
+- If the WG server changes (failover), `set_shadowsocks` detects the stale forward-addr and restarts sslocal automatically.
+- The sslocal process persists between cron runs. It is only killed when the Shadowsocks region changes or the forward address becomes stale.
 
 ### Port Forwarding
 

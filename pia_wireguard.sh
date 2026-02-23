@@ -12,7 +12,9 @@ set -eu  # Exit on error or undefined variable
 # - ipset with kernel modules: ip_set, ip_set_hash_ip, xt_set for VPN bypass
 # - Standard POSIX tools: sed, grep
 
-export PATH='/bin:/usr/bin:/sbin:/usr/sbin' # set PATH in case we run inside a cron
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+export PATH="${SCRIPT_DIR}:/bin:/usr/bin:/sbin:/usr/sbin"
+cd "${SCRIPT_DIR}" || exit 1
 if ! type "php" >/dev/null 2>&1; then php () { php-cli "$@" ; }; fi # FreshTomato PHP is called php-cli
 
 # Embedded PIA CA (gzip+base64); used when pia_cert not set
@@ -28,6 +30,16 @@ error_exit() {
   echo "[!] ERROR: $1" >&2
   logger -t pia_wireguard "ERROR: $1"
   exit 1
+}
+
+# Kill sslocal process listening on the Shadowsocks tunnel port
+kill_shadowsocks() {
+  local var_pid
+  var_pid=$(netstat -lunp 2>/dev/null | awk '/:51820 / && /\/sslocal/ {split($NF, a, "/"); print a[1]; exit}') || true
+  [ -z "${var_pid}" ] && return 0
+  kill "${var_pid}" 2>/dev/null || true
+  echo "[-] Stopped sslocal (PID ${var_pid})"
+  logger -t pia_wireguard "Stopped sslocal (PID ${var_pid})"
 }
 
 healthcheck_tunnel() {
@@ -48,6 +60,17 @@ healthcheck_tunnel() {
     logger -t pia_wireguard "[*] wg0 not ready yet"
     return 1
   }
+
+  # If WG endpoint is the sslocal tunnel, verify sslocal is listening
+  local var_endpoint
+  var_endpoint=$(wg show wg0 endpoints 2>/dev/null | awk '{print $2}')
+  if [ "${var_endpoint:-}" = "127.0.0.1:51820" ]; then
+    netstat -lunp 2>/dev/null | grep ':51820 ' | grep -q '/sslocal' || {
+      echo '[*] sslocal not running (endpoint 127.0.0.1:51820)'
+      logger -t pia_wireguard '[*] sslocal not running'
+      return 1
+    }
+  fi
 
   # TX check (matches official client transfer monitoring)
   local var_tx_before var_tx_after
@@ -92,9 +115,19 @@ healthcheck_tunnel() {
 
 init_script() {
   echo '[ ] Initializing script...'
+
+  # Env vars take precedence over saved config: command-line vars are exported,
+  # sourced config vars are not, so export -p captures only caller overrides
+  local var_env_overrides
+  var_env_overrides=$(export -p 2>/dev/null | grep ' pia_' || true)
+
   # Load config
   # shellcheck disable=SC1091
   [ -f pia_config ] && . ./pia_config
+
+  # Restore caller-provided overrides
+  # shellcheck disable=SC2086
+  [ -n "${var_env_overrides}" ] && eval "${var_env_overrides}"
 
   # Validate required variables
   [ -z "${pia_user:-}" ] && error_exit "pia_user not set"
@@ -134,6 +167,16 @@ init_script() {
   if [ "${pia_duckdns}" != 'false' ]; then
     echo "${pia_duckdns}" | grep -q ':' || error_exit "pia_duckdns must be in format DOMAIN:TOKEN"
   fi
+  # Set default Shadowsocks if not set
+  if [ -z "${pia_ss:-}" ]; then
+    echo '[*] pia_ss (Shadowsocks obfuscation) not set, defaulting to false'
+    pia_ss='false'
+  fi
+  # Validate pia_ss format (must be a region name or false)
+  if [ "${pia_ss}" != 'false' ]; then
+    echo "${pia_ss}" | grep -q '^[a-zA-Z0-9_-]\{1,\}$' || error_exit "pia_ss must be a valid region name (alphanumeric, underscores, hyphens)"
+    type sslocal >/dev/null 2>&1 || error_exit "sslocal not found in PATH (required for Shadowsocks)"
+  fi
   # Decode embedded cert/pubkey to raw PEM once (not written to config; used in-process)
   [ -n "${PIA_CA:-}" ] && [ -z "${pia_cert:-}" ] && pia_cert=$(echo "${PIA_CA}" | openssl base64 -A -d | gzip -d)
   [ -n "${PIA_SIG:-}" ] && [ -z "${pia_pubkey:-}" ] && pia_pubkey=$(echo "${PIA_SIG}" | openssl base64 -A -d | gzip -d)
@@ -145,6 +188,7 @@ pia_user="${pia_user}"
 pia_pass="${pia_pass}"
 pia_vpn="${pia_vpn}"
 pia_pf="${pia_pf}"
+pia_ss="${pia_ss}"
 pia_bypass="${pia_bypass}"
 pia_duckdns="${pia_duckdns}"
 EOF
@@ -283,6 +327,108 @@ EOF
   [ "${var_found}" = 'true' ] || error_exit "No reachable server in region ${pia_vpn}"
 }
 
+get_shadowsocks() {
+  echo '[ ] Fetching Shadowsocks server info...'
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+
+  # Cleanup: SS was active but is now disabled
+  if [ "${pia_ss:-false}" = 'false' ]; then
+    if [ -n "${shadowsocks_region:-}" ]; then
+      echo '[-] Shadowsocks disabled, clearing stale config...'
+      kill_shadowsocks
+      printf "%s\n" "$(grep -v '^shadowsocks_' pia_config 2>/dev/null || true)" > pia_config
+    fi
+    echo '[=] Shadowsocks disabled'
+    return 0
+  fi
+
+  # Check if SS region changed (cascade invalidation for shadowsocks_* only)
+  if [ -n "${shadowsocks_region:-}" ] && [ "${shadowsocks_region}" != "${pia_ss}" ]; then
+    echo "[~] Shadowsocks region changed from ${shadowsocks_region} to ${pia_ss}, clearing..."
+    logger -t pia_wireguard "Shadowsocks region changed from ${shadowsocks_region} to ${pia_ss}"
+    kill_shadowsocks
+    printf "%s\n" "$(grep -v '^shadowsocks_' pia_config 2>/dev/null || true)" > pia_config
+    # shellcheck disable=SC1091
+    [ -f pia_config ] && . ./pia_config
+  fi
+
+  # WAN interface for API call
+  local var_wan
+  var_wan=$(ip route show table main 2>/dev/null | awk '/^default / {print $5; exit}')
+  [ -z "${var_wan:-}" ] && error_exit "WAN interface not found"
+
+  # Trust cached SS config if present (no probe: SS servers don't speak HTTP/TLS)
+  if [ -n "${shadowsocks_host:-}" ] && [ -n "${shadowsocks_port:-}" ] && \
+     [ -n "${shadowsocks_key:-}" ] && [ -n "${shadowsocks_cipher:-}" ]; then
+    echo '[=] Shadowsocks info already exists'
+    return 0
+  fi
+
+  # Fetch Shadowsocks server list with signature
+  local var_response var_json var_signature
+  var_response=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss 'https://serverlist.piaservers.net/shadow_socks')
+  var_json=$(echo "${var_response}" | head -1)
+  var_signature=$(echo "${var_response}" | tail -n 6)
+
+  # Verify RSA signature (same key as WireGuard server list)
+  [ -n "${pia_pubkey:-}" ] || error_exit "pia_pubkey not set"
+  echo "${pia_pubkey}" > pia_tmp_pubkey
+  [ -s pia_tmp_pubkey ] || error_exit "Failed to write public key"
+  echo "${var_signature}" | openssl base64 -d > pia_tmp_sig
+  printf "%s" "${var_json}" > pia_tmp_json
+  if ! openssl dgst -sha256 -verify pia_tmp_pubkey -signature pia_tmp_sig pia_tmp_json >/dev/null 2>&1; then
+    rm -f pia_tmp_sig pia_tmp_json pia_tmp_pubkey
+    error_exit "Shadowsocks server list signature verification failed"
+  fi
+  rm -f pia_tmp_sig pia_tmp_json pia_tmp_pubkey
+  echo '[*] Shadowsocks server list signature verified'
+
+  # Parse: find first entry matching pia_ss; list valid regions on failure
+  local var_php vars_ss
+  var_php=$(cat <<'SSEOF'
+    $list = json_decode(stream_get_contents(STDIN));
+    if (!$list || !is_array($list)) exit(1);
+    $match = current(array_filter($list, fn($s) => $s->region === "SS_REGION"));
+    if (!$match) {
+      $regions = implode(", ", array_unique(array_map(fn($s) => $s->region, $list)));
+      fwrite(STDERR, "ERROR: Shadowsocks region 'SS_REGION' not found. Valid regions: $regions\n");
+      exit(1);
+    }
+    echo "shadowsocks_region=\"SS_REGION\"\n";
+    echo "shadowsocks_host=\"$match->host\"\n";
+    echo "shadowsocks_port=\"$match->port\"\n";
+    echo "shadowsocks_key=\"$match->key\"\n";
+    echo "shadowsocks_cipher=\"$match->cipher\"\n";
+SSEOF
+  )
+  var_php=$(echo "${var_php}" | sed "s/SS_REGION/${pia_ss}/g")
+  # shellcheck disable=SC2310
+  if ! vars_ss=$(echo "${var_json}" | php -r "${var_php}" 2>pia_tmp_ss_err); then
+    local var_err
+    var_err=$(cat pia_tmp_ss_err 2>/dev/null)
+    rm -f pia_tmp_ss_err
+    error_exit "${var_err:-Shadowsocks server list parsing failed}"
+  fi
+  rm -f pia_tmp_ss_err
+  [ -n "${vars_ss}" ] || error_exit "Failed to parse Shadowsocks server list"
+
+  # Validate parsed values
+  local var_ss_host var_ss_port var_ss_key var_ss_cipher
+  var_ss_host=$(echo "${vars_ss}" | grep '^shadowsocks_host=' | cut -d'"' -f2)
+  var_ss_port=$(echo "${vars_ss}" | grep '^shadowsocks_port=' | cut -d'"' -f2)
+  var_ss_key=$(echo "${vars_ss}" | grep '^shadowsocks_key=' | cut -d'"' -f2)
+  var_ss_cipher=$(echo "${vars_ss}" | grep '^shadowsocks_cipher=' | cut -d'"' -f2)
+  echo "${var_ss_host}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || error_exit "Invalid Shadowsocks host IP: ${var_ss_host}"
+  [ "${var_ss_port}" -ge 1 ] 2>/dev/null && [ "${var_ss_port}" -le 65535 ] 2>/dev/null || error_exit "Invalid Shadowsocks port: ${var_ss_port}"
+  [ -n "${var_ss_key}" ] || error_exit "Shadowsocks key is empty"
+  [ -n "${var_ss_cipher}" ] || error_exit "Shadowsocks cipher is empty"
+
+  # Save to config
+  printf "%s\n%s\n" "$(grep -v '^shadowsocks_' pia_config 2>/dev/null || true)" "${vars_ss}" > pia_config
+  echo "[+] Shadowsocks info ready (${var_ss_host}:${var_ss_port})"
+}
+
 get_token() {
   echo '[ ] Generating PIA token...'
   # Load config
@@ -403,6 +549,71 @@ EOF
   echo '[+] Auth ready'
 }
 
+set_shadowsocks() {
+  echo '[ ] Configuring Shadowsocks tunnel...'
+  # shellcheck disable=SC1091
+  [ -f pia_config ] && . ./pia_config
+
+  # Cleanup: kill stale sslocal if SS is now disabled
+  if [ "${pia_ss:-false}" = 'false' ]; then
+    kill_shadowsocks
+    echo '[=] Shadowsocks disabled'
+    return 0
+  fi
+
+  # Validate prerequisites
+  [ -z "${shadowsocks_host:-}" ] && error_exit "shadowsocks_host not set"
+  [ -z "${shadowsocks_port:-}" ] && error_exit "shadowsocks_port not set"
+  [ -z "${shadowsocks_key:-}" ] && error_exit "shadowsocks_key not set"
+  [ -z "${shadowsocks_cipher:-}" ] && error_exit "shadowsocks_cipher not set"
+  [ -z "${region_wg_ip:-}" ] && error_exit "region_wg_ip not set"
+  [ -z "${region_wg_port:-}" ] && error_exit "region_wg_port not set"
+
+  # Idempotent: check if sslocal is already running with the correct forward-addr
+  local var_pid
+  var_pid=$(netstat -lunp 2>/dev/null | awk '/:51820 / && /\/sslocal/ {split($NF, a, "/"); print a[1]; exit}') || true
+  if [ -n "${var_pid}" ]; then
+    if tr '\0' ' ' < "/proc/${var_pid}/cmdline" 2>/dev/null | grep -qF "${region_wg_ip}:${region_wg_port}"; then
+      echo "[=] Shadowsocks tunnel already running (PID ${var_pid})"
+      return 0
+    fi
+    echo "[~] Shadowsocks forward-addr stale, restarting..."
+    kill_shadowsocks
+  fi
+
+  # Start sslocal in UDP tunnel mode (retry with exponential backoff)
+  local var_attempt=1 var_backoff=1
+  while [ "${var_attempt}" -le 5 ]; do
+    if [ "${var_attempt}" -gt 1 ]; then
+      echo "[~] Retry ${var_attempt}/5 (backoff: ${var_backoff}s)..."
+      sleep "${var_backoff}"
+      var_backoff=$((var_backoff * 2))
+    fi
+    sslocal --protocol tunnel \
+      -b "127.0.0.1:51820" \
+      -s "${shadowsocks_host}:${shadowsocks_port}" \
+      -k "${shadowsocks_key}" \
+      -m "${shadowsocks_cipher}" \
+      -f "${region_wg_ip}:${region_wg_port}" \
+      -U \
+      --outbound-fwmark 3851 \
+      -d 2>pia_tmp_ss_start_err
+    sleep 1
+    var_pid=$(netstat -lunp 2>/dev/null | awk '/:51820 / && /\/sslocal/ {split($NF, a, "/"); print a[1]; exit}') || true
+    [ -n "${var_pid}" ] && break
+    var_attempt=$((var_attempt + 1))
+  done
+  if [ -z "${var_pid}" ]; then
+    local var_err
+    var_err=$(cat pia_tmp_ss_start_err 2>/dev/null)
+    rm -f pia_tmp_ss_start_err
+    error_exit "sslocal failed to start after 5 attempts${var_err:+: ${var_err}}"
+  fi
+  rm -f pia_tmp_ss_start_err
+
+  echo "[+] Shadowsocks tunnel ready (PID ${var_pid})"
+}
+
 set_wg() {
   echo '[ ] Configuring WireGuard...'
   # Load config
@@ -431,12 +642,24 @@ set_wg() {
     echo '[-] Removing existing peers'
     for p in $(wg show wg0 peers 2>/dev/null); do wg set wg0 peer "${p}" remove; done
   fi
-  # Configure WireGuard
-  wg set wg0 fwmark 0xf0b private-key pia_tmp_prvkey peer "${auth_server_key}" endpoint "${region_wg_ip}:${region_wg_port}" persistent-keepalive 25 allowed-ips '0.0.0.0/0'
+  # Configure WireGuard (endpoint goes through sslocal when Shadowsocks is active)
+  local var_endpoint
+  if [ "${pia_ss:-false}" != 'false' ]; then
+    var_endpoint="127.0.0.1:51820"
+  else
+    var_endpoint="${region_wg_ip}:${region_wg_port}"
+  fi
+  wg set wg0 fwmark 0xf0b private-key pia_tmp_prvkey peer "${auth_server_key}" endpoint "${var_endpoint}" persistent-keepalive 25 allowed-ips '0.0.0.0/0'
   # Remove private key file
   rm -f pia_tmp_prvkey
   ip addr flush dev wg0
   ip addr replace "${auth_peer_ip}" dev wg0
+  # Double encapsulation (WG inside SS) requires reduced MTU
+  if [ "${pia_ss:-false}" != 'false' ]; then
+    ip link set wg0 mtu 1400
+  else
+    ip link set wg0 mtu 1420
+  fi
   # Bring up interface with retry (often fails first attempt)
   local var_attempt=1 var_backoff=1
   while [ "${var_attempt}" -le 5 ]; do
@@ -801,9 +1024,11 @@ if ! healthcheck_tunnel; then
 fi
 
 get_region
+get_shadowsocks
 get_token
 gen_peer
 get_auth
+set_shadowsocks
 set_wg
 set_firewall
 set_ipv6

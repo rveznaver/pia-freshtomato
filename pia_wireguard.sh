@@ -242,8 +242,8 @@ get_region() {
      [ "${region_id:-}" = "${pia_vpn}" ]; then
     [ -n "${pia_cert:-}" ] && echo "${pia_cert}" > pia_tmp_cert
     if [ -s pia_tmp_cert ]; then
-      if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/" 2>/dev/null && \
-         curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert "https://${region_cn}:1337/" 2>/dev/null; then
+      if curl --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/" 2>/dev/null && \
+         curl --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert "https://${region_cn}:1337/" 2>/dev/null; then
         rm -f pia_tmp_cert
         echo '[=] Region info already exists (cached server reachable)'
         return 0
@@ -253,9 +253,18 @@ get_region() {
     logger -t pia_wireguard "Connectivity failed for cached server, refetching serverlist"
   fi
 
+  # Resolve serverlist hostname via DoH over WAN (--doh-url doesn't respect --interface)
+  local var_resolved_ip
+  var_resolved_ip=$(curl --interface "${var_wan}" -sS -m 10 \
+    "https://1.1.1.1/dns-query?name=serverlist.piaservers.net&type=A" \
+    -H "accept: application/dns-json" | \
+    php -r '$d=json_decode(stream_get_contents(STDIN)); foreach($d->Answer??[] as $a) if($a->type===1){echo $a->data;break;}')
+  echo "${var_resolved_ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || \
+    error_exit "DoH resolve failed for serverlist.piaservers.net"
+
   # Fetch server list with signature
   local var_response var_json var_signature
-  var_response=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
+  var_response=$(curl --interface "${var_wan}" --resolve "serverlist.piaservers.net:443:${var_resolved_ip}" --retry 5 -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
   var_json=$(echo "${var_response}" | head -1)
   var_signature=$(echo "${var_response}" | tail -n 6)
 
@@ -313,8 +322,8 @@ EOF
     var_cn=$(echo "${var_line}" | cut -d# -f1)
     var_meta_ip=$(echo "${var_line}" | cut -d# -f2)
     var_wg_ip=$(echo "${var_line}" | cut -d# -f3)
-    if curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_meta_ip}:" --cacert pia_tmp_cert "https://${var_cn}/" 2>/dev/null && \
-       curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_wg_ip}:" --cacert pia_tmp_cert "https://${var_cn}:1337/" 2>/dev/null; then
+    if curl --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_meta_ip}:" --cacert pia_tmp_cert "https://${var_cn}/" 2>/dev/null && \
+       curl --interface "${var_wan}" -sS -o /dev/null -m 5 --connect-to "${var_cn}::${var_wg_ip}:" --cacert pia_tmp_cert "https://${var_cn}:1337/" 2>/dev/null; then
       printf "%s\n" "$(grep -v '^region_' pia_config 2>/dev/null || true)" "region_id=\"${pia_vpn}\"" "region_cn=\"${var_cn}\"" "region_meta_ip=\"${var_meta_ip}\"" "region_wg_ip=\"${var_wg_ip}\"" "region_wg_port=\"1337\"" "region_pf=\"${var_region_pf}\"" > pia_config
       echo "[+] Region info ready (selected ${var_cn})"
       logger -t pia_wireguard "Selected ${var_cn}"
@@ -365,9 +374,18 @@ get_shadowsocks() {
     return 0
   fi
 
+  # Resolve serverlist hostname via DoH over WAN (--doh-url doesn't respect --interface)
+  local var_resolved_ip
+  var_resolved_ip=$(curl --interface "${var_wan}" -sS -m 10 \
+    "https://1.1.1.1/dns-query?name=serverlist.piaservers.net&type=A" \
+    -H "accept: application/dns-json" | \
+    php -r '$d=json_decode(stream_get_contents(STDIN)); foreach($d->Answer??[] as $a) if($a->type===1){echo $a->data;break;}')
+  echo "${var_resolved_ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || \
+    error_exit "DoH resolve failed for serverlist.piaservers.net"
+
   # Fetch Shadowsocks server list with signature
   local var_response var_json var_signature
-  var_response=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss 'https://serverlist.piaservers.net/shadow_socks')
+  var_response=$(curl --interface "${var_wan}" --resolve "serverlist.piaservers.net:443:${var_resolved_ip}" --retry 5 -Ss 'https://serverlist.piaservers.net/shadow_socks')
   var_json=$(echo "${var_response}" | head -1)
   var_signature=$(echo "${var_response}" | tail -n 6)
 
@@ -464,10 +482,18 @@ EOF
   )
   # Try region meta generateToken first
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! var_token=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/authv3/generateToken" | php -r "${var_php}"); then
+  if ! var_token=$(curl --interface "${var_wan}" --retry 5 -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/authv3/generateToken" | php -r "${var_php}"); then
     echo '[~] Meta token failed, trying public token API...'
+    # Resolve PIA hostname via DoH over WAN (--doh-url doesn't respect --interface)
+    local var_resolved_ip
+    var_resolved_ip=$(curl --interface "${var_wan}" -sS -m 10 \
+      "https://1.1.1.1/dns-query?name=www.privateinternetaccess.com&type=A" \
+      -H "accept: application/dns-json" | \
+      php -r '$d=json_decode(stream_get_contents(STDIN)); foreach($d->Answer??[] as $a) if($a->type===1){echo $a->data;break;}')
+    echo "${var_resolved_ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || \
+      error_exit "DoH resolve failed for www.privateinternetaccess.com"
     # Fallback: public token endpoint
-    if ! var_token=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 5 -Ss -X POST -F "username=${pia_user}" -F "password=${pia_pass}" "https://www.privateinternetaccess.com/api/client/v2/token" | php -r "${var_php}"); then
+    if ! var_token=$(curl --interface "${var_wan}" --resolve "www.privateinternetaccess.com:443:${var_resolved_ip}" --retry 5 -Ss -X POST -F "username=${pia_user}" -F "password=${pia_pass}" "https://www.privateinternetaccess.com/api/client/v2/token" | php -r "${var_php}"); then
       # Both failed: clear region so next run re-selects server pair
       printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^portforward_' pia_config 2>/dev/null || true)" > pia_config
       error_exit "Token generation failed (meta and public API); region cleared for next run"
@@ -537,7 +563,7 @@ get_auth() {
 EOF
   )
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! vars_auth=$(curl --doh-url "https://1.1.1.1/dns-query" --interface "${var_wan}" --retry 10 -GSs --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
+  if ! vars_auth=$(curl --interface "${var_wan}" --retry 10 -GSs --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
     printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
     logger -t pia_wireguard "WireGuard authentication failed, cleared region/token/auth for failover"
     error_exit "WireGuard authentication failed"

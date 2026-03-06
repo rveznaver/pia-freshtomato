@@ -110,7 +110,7 @@ Four layers: User config (`pia_*`), cached metadata (`region_*` including `regio
 `set_ipv6()` drops all routed IPv6 traffic via a dedicated `PIA_FORWARD_V6` ip6tables chain to prevent leaks bypassing the VPN. LAN-to-LAN IPv6 is unaffected (handled by bridge at layer 2, never enters FORWARD).
 
 ### WAN and PIA API
-All PIA API traffic that must work when the tunnel is broken (get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) stays on `--interface wg0`.
+All PIA API traffic that must work when the tunnel is broken (get_region, get_token, get_auth) uses DoH (`--doh-url "https://1.1.1.1/dns-query"`) and is bound to the default-route interface (`--interface`). WAN interface is detected in each function from the main routing table: `ip route show table main default` (device name). No config override (e.g. no `pia_wan_interface`). Port-forward API (getSignature, bindPort) reaches `auth_server_vip:19999` through the VPN tunnel (table 1337 routes the VIP via wg0; no `--interface` needed). TLS uses `--connect-to "${region_cn}::${auth_server_vip}:"` with `--cacert` for full certificate verification (chain + hostname); the server cert's SAN matches `region_cn`.
 
 ### Routing
 - Table 1337: `default dev wg0` plus throw routes so local traffic falls through to main:

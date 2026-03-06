@@ -888,7 +888,7 @@ get_portforward() {
   echo "${pia_cert}" > pia_tmp_cert
   [ -s pia_tmp_cert ] || error_exit "Failed to write certificate"
   # Request port forward signature
-  local var_php vars_portforward
+  local var_php var_response vars_portforward
   var_php=$(cat <<'EOF'
     $d = json_decode(stream_get_contents(STDIN));
     if (!$d || ($d->status ?? "") !== "OK") exit(1);
@@ -901,10 +901,12 @@ get_portforward() {
     echo "portforward_exp=\"" . $expires_epoch . "\"\n";
 EOF
   )
+  var_response=$(curl --retry 10 -GSs --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_cn}:19999/getSignature" 2>&1) || true
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! vars_portforward=$(curl --retry 10 -GSs --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_cn}:19999/getSignature" --interface wg0 | php -r "${var_php}"); then
-    printf "%s\n" "$(grep -v '^portforward_' pia_config 2>/dev/null || true)" > pia_config
-    error_exit "Port forward signature failed"
+  if ! vars_portforward=$(echo "${var_response}" | php -r "${var_php}"); then
+    printf "%s\n" "$(grep -v '^portforward_\|^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
+    logger -t pia_wireguard "Port forward signature failed (token/auth cleared): ${var_response}"
+    error_exit "Port forward signature failed: ${var_response}"
   fi
   # Remove certificate file
   rm -f pia_tmp_cert
@@ -935,7 +937,7 @@ set_portforward() {
   [ -s pia_tmp_cert ] || error_exit "Failed to write certificate"
   # Bind port with PIA (always refresh binding)
   local var_bind_response var_bind_status var_bind_message
-  var_bind_response=$(curl --retry 3 -sGm 5 --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_cn}:19999/bindPort" --interface wg0) || true
+  var_bind_response=$(curl --retry 3 -sGm 5 --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "payload=${portforward_payload}" --data-urlencode "signature=${portforward_signature}" "https://${region_cn}:19999/bindPort") || true
   # Remove certificate file
   rm -f pia_tmp_cert
   # Parse response

@@ -264,7 +264,7 @@ get_region() {
 
   # Fetch server list with signature
   local var_response var_json var_signature
-  var_response=$(curl --interface "${var_wan}" --resolve "serverlist.piaservers.net:443:${var_resolved_ip}" --retry 5 -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
+  var_response=$(curl --interface "${var_wan}" --resolve "serverlist.piaservers.net:443:${var_resolved_ip}" --retry 5 --connect-timeout 5 -m 20 -Ss 'https://serverlist.piaservers.net/vpninfo/servers/v7')
   var_json=$(echo "${var_response}" | head -1)
   var_signature=$(echo "${var_response}" | tail -n 6)
 
@@ -385,7 +385,7 @@ get_shadowsocks() {
 
   # Fetch Shadowsocks server list with signature
   local var_response var_json var_signature
-  var_response=$(curl --interface "${var_wan}" --resolve "serverlist.piaservers.net:443:${var_resolved_ip}" --retry 5 -Ss 'https://serverlist.piaservers.net/shadow_socks')
+  var_response=$(curl --interface "${var_wan}" --resolve "serverlist.piaservers.net:443:${var_resolved_ip}" --retry 5 --connect-timeout 5 -m 20 -Ss 'https://serverlist.piaservers.net/shadow_socks')
   var_json=$(echo "${var_response}" | head -1)
   var_signature=$(echo "${var_response}" | tail -n 6)
 
@@ -482,7 +482,7 @@ EOF
   )
   # Try region meta generateToken first
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! var_token=$(curl --interface "${var_wan}" --retry 5 -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/authv3/generateToken" | php -r "${var_php}"); then
+  if ! var_token=$(curl --interface "${var_wan}" --retry 5 --connect-timeout 5 -m 20 -Ss -u "${pia_user}:${pia_pass}" --connect-to "${region_cn}::${region_meta_ip}:" --cacert pia_tmp_cert "https://${region_cn}/authv3/generateToken" | php -r "${var_php}"); then
     echo '[~] Meta token failed, trying public token API...'
     # Resolve PIA hostname via DoH over WAN (--doh-url doesn't respect --interface)
     local var_resolved_ip
@@ -493,7 +493,7 @@ EOF
     echo "${var_resolved_ip}" | grep -q '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$' || \
       error_exit "DoH resolve failed for www.privateinternetaccess.com"
     # Fallback: public token endpoint
-    if ! var_token=$(curl --interface "${var_wan}" --resolve "www.privateinternetaccess.com:443:${var_resolved_ip}" --retry 5 -Ss -X POST -F "username=${pia_user}" -F "password=${pia_pass}" "https://www.privateinternetaccess.com/api/client/v2/token" | php -r "${var_php}"); then
+    if ! var_token=$(curl --interface "${var_wan}" --resolve "www.privateinternetaccess.com:443:${var_resolved_ip}" --retry 5 --connect-timeout 5 -m 20 -Ss -X POST -F "username=${pia_user}" -F "password=${pia_pass}" "https://www.privateinternetaccess.com/api/client/v2/token" | php -r "${var_php}"); then
       # Both failed: clear region so next run re-selects server pair
       printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_\|^portforward_' pia_config 2>/dev/null || true)" > pia_config
       error_exit "Token generation failed (meta and public API); region cleared for next run"
@@ -563,7 +563,7 @@ get_auth() {
 EOF
   )
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
-  if ! vars_auth=$(curl --interface "${var_wan}" --retry 10 -GSs --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
+  if ! vars_auth=$(curl --interface "${var_wan}" --retry 10 --connect-timeout 5 -m 20 --retry-max-time 120 -GSs --connect-to "${region_cn}::${region_wg_ip}:" --cacert pia_tmp_cert --data-urlencode "pt=${token}" --data-urlencode "pubkey=${peer_pubkey}" "https://${region_cn}:${region_wg_port}/addKey" | php -r "${var_php}"); then
     printf "%s\n" "$(grep -v '^region_\|^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config
     logger -t pia_wireguard "WireGuard authentication failed, cleared region/token/auth for failover"
     error_exit "WireGuard authentication failed"
@@ -901,7 +901,7 @@ get_portforward() {
     echo "portforward_exp=\"" . $expires_epoch . "\"\n";
 EOF
   )
-  var_response=$(curl --retry 10 -GSs --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_cn}:19999/getSignature" 2>&1) || true
+  var_response=$(curl --retry 10 --connect-timeout 5 -m 15 --retry-max-time 60 -GSs --connect-to "${region_cn}::${auth_server_vip}:" --cacert pia_tmp_cert --data-urlencode "token=${token}" "https://${region_cn}:19999/getSignature" 2>&1) || true
   # shellcheck disable=SC2310  # php is a function wrapper for php-cli on FreshTomato
   if ! vars_portforward=$(echo "${var_response}" | php -r "${var_php}"); then
     printf "%s\n" "$(grep -v '^portforward_\|^token=\|^auth_' pia_config 2>/dev/null || true)" > pia_config

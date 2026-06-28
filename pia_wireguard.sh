@@ -135,8 +135,8 @@ init_script() {
 
   # Set default region if not set
   if [ -z "${pia_vpn:-}" ]; then
-    echo '[*] pia_vpn (region) not set, defaulting to ca_ontario (Ontario, Canada)'
-    pia_vpn='ca_ontario'
+    echo '[*] pia_vpn (region) not set, defaulting to ca (Montreal, Canada)'
+    pia_vpn='ca'
   fi
   # Set default port forwarding if not set
   if [ -z "${pia_pf:-}" ]; then
